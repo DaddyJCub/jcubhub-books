@@ -1,0 +1,1023 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JcubHub Books - Your Digital Library</title>
+
+  <!-- Cloudflare Turnstile -->
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body, html {
+      height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: #0a0a0a;
+      color: #fff;
+      overflow-x: hidden;
+    }
+
+    /* Animated background gradient */
+    body::before {
+      content: "";
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: radial-gradient(ellipse at top left, rgba(102, 126, 234, 0.15) 0%, transparent 50%),
+                  radial-gradient(ellipse at bottom right, rgba(118, 75, 162, 0.15) 0%, transparent 50%),
+                  radial-gradient(ellipse at center, rgba(255, 255, 255, 0.02) 0%, transparent 70%);
+      animation: breathe 20s ease-in-out infinite;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    @keyframes breathe {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+
+    /* Floating particles effect */
+    .particles {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    .particle {
+      position: absolute;
+      width: 2px;
+      height: 2px;
+      background: rgba(255, 255, 255, 0.5);
+      border-radius: 50%;
+      animation: float 20s infinite linear;
+    }
+
+    @keyframes float {
+      from {
+        transform: translateY(100vh) translateX(0);
+        opacity: 0;
+      }
+      10% {
+        opacity: 1;
+      }
+      90% {
+        opacity: 1;
+      }
+      to {
+        transform: translateY(-100vh) translateX(100px);
+        opacity: 0;
+      }
+    }
+
+    /* Main container */
+    .main-container {
+      position: relative;
+      width: 100%;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 2;
+    }
+
+    /* Logo/Title Section */
+    .logo-section {
+      position: absolute;
+      top: 40px;
+      left: 50%;
+      transform: translateX(-50%);
+      text-align: center;
+      z-index: 10;
+      animation: slideDown 1s ease-out;
+    }
+
+    @keyframes slideDown {
+      from {
+        opacity: 0;
+        transform: translateX(-50%) translateY(-30px);
+      }
+      to {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
+    }
+
+    .logo-title {
+      font-size: 2.5rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      letter-spacing: -1px;
+      margin-bottom: 8px;
+    }
+
+    .logo-subtitle {
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 1rem;
+      font-weight: 400;
+    }
+
+    /* Split screen container */
+    .split {
+      position: relative;
+      display: flex;
+      width: 90%;
+      max-width: 1200px;
+      height: 60vh;
+      min-height: 400px;
+      gap: 30px;
+      animation: fadeInScale 1s ease-out 0.3s both;
+    }
+
+    @keyframes fadeInScale {
+      from {
+        opacity: 0;
+        transform: scale(0.9);
+      }
+      to {
+        opacity: 1;
+        transform: scale(1);
+      }
+    }
+
+    /* Card styling */
+    .card {
+      flex: 1;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background-size: cover;
+      background-position: center;
+      border-radius: 20px;
+      overflow: hidden;
+      cursor: pointer;
+      transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+    }
+
+    .card:hover {
+      transform: translateY(-10px) scale(1.02);
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+    }
+
+    /* Glass overlay effect */
+    .card::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(135deg, rgba(0, 0, 0, 0.7) 0%, rgba(0, 0, 0, 0.4) 100%);
+      backdrop-filter: blur(5px);
+      -webkit-backdrop-filter: blur(5px);
+      transition: all 0.4s ease;
+      z-index: 1;
+    }
+
+    .card:hover::before {
+      backdrop-filter: blur(2px);
+      -webkit-backdrop-filter: blur(2px);
+      background: linear-gradient(135deg, rgba(0, 0, 0, 0.5) 0%, rgba(0, 0, 0, 0.2) 100%);
+    }
+
+    /* Card content */
+    .card-content {
+      position: relative;
+      z-index: 2;
+      text-align: center;
+      padding: 30px;
+    }
+
+    .card-icon {
+      width: 80px;
+      height: 80px;
+      margin: 0 auto 20px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      backdrop-filter: blur(10px);
+      border: 2px solid rgba(255, 255, 255, 0.2);
+      transition: all 0.3s ease;
+    }
+
+    .card:hover .card-icon {
+      transform: rotate(360deg) scale(1.1);
+      background: rgba(255, 255, 255, 0.15);
+    }
+
+    .card-icon svg {
+      width: 40px;
+      height: 40px;
+      fill: #fff;
+    }
+
+    .card h2 {
+      font-size: 2.2rem;
+      font-weight: 600;
+      margin-bottom: 10px;
+      letter-spacing: -0.5px;
+    }
+
+    .card-description {
+      font-size: 1rem;
+      color: rgba(255, 255, 255, 0.7);
+      opacity: 0;
+      transform: translateY(10px);
+      transition: all 0.3s ease;
+    }
+
+    .card:hover .card-description {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* Card specific styles */
+    .request-card {
+      background-image: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+
+    .download-card {
+      background-image: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+    }
+
+    /* Request form overlay */
+    .request-form-container {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(10, 10, 10, 0.95);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.4s ease;
+      z-index: 100;
+      overflow-y: auto;
+      padding: 20px;
+    }
+
+    .request-form-container.active {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    /* Back button */
+    .back-button {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: #fff;
+      padding: 10px 20px;
+      border-radius: 50px;
+      cursor: pointer;
+      font-size: 0.95rem;
+      backdrop-filter: blur(10px);
+      transition: all 0.3s ease;
+      z-index: 101;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .back-button:hover {
+      background: rgba(255, 255, 255, 0.15);
+      transform: translateX(-5px);
+    }
+
+    /* Form wrapper */
+    .form-wrapper {
+      background: rgba(255, 255, 255, 0.05);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 24px;
+      padding: 40px;
+      max-width: 500px;
+      width: 100%;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+      animation: formSlideUp 0.5s ease-out;
+    }
+
+    @keyframes formSlideUp {
+      from {
+        opacity: 0;
+        transform: translateY(30px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .form-title {
+      font-size: 2rem;
+      margin-bottom: 10px;
+      text-align: center;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .form-subtitle {
+      text-align: center;
+      color: rgba(255, 255, 255, 0.6);
+      margin-bottom: 30px;
+      font-size: 0.95rem;
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    .form-group label {
+      display: block;
+      margin-bottom: 8px;
+      color: rgba(255, 255, 255, 0.9);
+      font-size: 0.9rem;
+      font-weight: 500;
+      letter-spacing: 0.3px;
+    }
+
+    .form-group input,
+    .form-group textarea,
+    .form-group select {
+      width: 100%;
+      padding: 12px 16px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 12px;
+      color: #fff;
+      font-size: 1rem;
+      transition: all 0.3s ease;
+      font-family: inherit;
+    }
+
+    .form-group input::placeholder,
+    .form-group textarea::placeholder {
+      color: rgba(255, 255, 255, 0.4);
+    }
+
+    .form-group input:focus,
+    .form-group textarea:focus,
+    .form-group select:focus {
+      outline: none;
+      background: rgba(255, 255, 255, 0.12);
+      border-color: #667eea;
+      box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    }
+
+    .form-group textarea {
+      resize: vertical;
+      min-height: 100px;
+    }
+
+    .form-group select option {
+      background: #1a1a2e;
+      color: #fff;
+    }
+
+    /* Turnstile container */
+    .turnstile-container {
+      display: flex;
+      justify-content: center;
+      margin: 20px 0;
+    }
+
+    .submit-button {
+      width: 100%;
+      padding: 14px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border: none;
+      border-radius: 12px;
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .submit-button::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: -100%;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+      transition: left 0.5s ease;
+    }
+
+    .submit-button:hover::before {
+      left: 100%;
+    }
+
+    .submit-button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+    }
+
+    .submit-button:disabled {
+      opacity: 0.7;
+      cursor: not-allowed;
+    }
+
+    /* Success message */
+    .success-message {
+      display: none;
+      text-align: center;
+      padding: 20px;
+      background: rgba(34, 197, 94, 0.1);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      border-radius: 12px;
+      color: #22c55e;
+      margin-top: 20px;
+    }
+
+    .success-message.show {
+      display: block;
+      animation: fadeIn 0.5s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Login info popup */
+    .login-info-popup {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(10, 10, 10, 0.95);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.4s ease;
+      z-index: 200;
+      padding: 20px;
+    }
+
+    .login-info-popup.active {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    .popup-content {
+      background: rgba(255, 255, 255, 0.05);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 24px;
+      padding: 40px;
+      max-width: 500px;
+      width: 100%;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+      animation: popupSlideUp 0.5s ease-out;
+      text-align: center;
+    }
+
+    @keyframes popupSlideUp {
+      from {
+        opacity: 0;
+        transform: translateY(30px) scale(0.9);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+
+    .popup-icon {
+      width: 80px;
+      height: 80px;
+      margin: 0 auto 20px;
+      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.05); }
+    }
+
+    .popup-icon svg {
+      width: 40px;
+      height: 40px;
+      fill: #fff;
+    }
+
+    .popup-title {
+      font-size: 1.8rem;
+      margin-bottom: 15px;
+      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      font-weight: 600;
+    }
+
+    .popup-message {
+      color: rgba(255, 255, 255, 0.8);
+      font-size: 1rem;
+      line-height: 1.6;
+      margin-bottom: 30px;
+    }
+
+    .popup-buttons {
+      display: flex;
+      gap: 15px;
+      justify-content: center;
+    }
+
+    .popup-button {
+      padding: 12px 30px;
+      border-radius: 12px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      border: none;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .popup-button-primary {
+      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+      color: #fff;
+    }
+
+    .popup-button-primary::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: -100%;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+      transition: left 0.5s ease;
+    }
+
+    .popup-button-primary:hover::before {
+      left: 100%;
+    }
+
+    .popup-button-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 30px rgba(245, 87, 108, 0.4);
+    }
+
+    .popup-button-secondary {
+      background: rgba(255, 255, 255, 0.1);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+
+    .popup-button-secondary:hover {
+      background: rgba(255, 255, 255, 0.15);
+      transform: translateY(-2px);
+    }
+
+    /* Footer */
+    .footer {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      text-align: center;
+      color: rgba(255, 255, 255, 0.4);
+      font-size: 0.85rem;
+      z-index: 10;
+    }
+
+    /* Mobile Responsive Design */
+    @media (max-width: 768px) {
+      .logo-section {
+        top: 20px;
+      }
+
+      .logo-title {
+        font-size: 1.8rem;
+      }
+
+      .logo-subtitle {
+        font-size: 0.9rem;
+      }
+
+      .main-container {
+        padding: 100px 20px 80px;
+      }
+
+      .split {
+        flex-direction: column;
+        width: 100%;
+        height: auto;
+        gap: 20px;
+      }
+
+      .card {
+        min-height: 200px;
+        border-radius: 16px;
+      }
+
+      .card h2 {
+        font-size: 1.8rem;
+      }
+
+      .card-icon {
+        width: 60px;
+        height: 60px;
+      }
+
+      .card-icon svg {
+        width: 30px;
+        height: 30px;
+      }
+
+      .card-description {
+        opacity: 1;
+        transform: translateY(0);
+        font-size: 0.9rem;
+      }
+
+      .request-form-container {
+        padding: 60px 20px 20px;
+      }
+
+      .form-wrapper {
+        padding: 30px 20px;
+        border-radius: 20px;
+        margin: 0 10px;
+      }
+
+      .form-title {
+        font-size: 1.6rem;
+      }
+
+      .back-button {
+        top: 10px;
+        left: 10px;
+        padding: 8px 16px;
+        font-size: 0.9rem;
+      }
+
+      .footer {
+        bottom: 10px;
+        font-size: 0.75rem;
+      }
+
+      .popup-content {
+        padding: 30px 20px;
+      }
+
+      .popup-title {
+        font-size: 1.5rem;
+      }
+
+      .popup-message {
+        font-size: 0.95rem;
+      }
+
+      .popup-buttons {
+        flex-direction: column;
+      }
+
+      .popup-button {
+        width: 100%;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .logo-title {
+        font-size: 1.5rem;
+      }
+
+      .card h2 {
+        font-size: 1.5rem;
+      }
+
+      .form-group input,
+      .form-group textarea,
+      .form-group select {
+        padding: 10px 14px;
+        font-size: 0.95rem;
+      }
+
+      .submit-button {
+        padding: 12px;
+        font-size: 0.95rem;
+      }
+    }
+
+    /* Landscape mode adjustments */
+    @media (max-height: 600px) and (orientation: landscape) {
+      .split {
+        height: 70vh;
+        min-height: 300px;
+      }
+
+      .card {
+        min-height: 150px;
+      }
+
+      .card-icon {
+        width: 50px;
+        height: 50px;
+        margin-bottom: 10px;
+      }
+
+      .card h2 {
+        font-size: 1.5rem;
+      }
+
+      .logo-section {
+        top: 10px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- Animated particles background -->
+  <div class="particles">
+    <div class="particle" style="left: 10%; animation-delay: 0s;"></div>
+    <div class="particle" style="left: 20%; animation-delay: 2s;"></div>
+    <div class="particle" style="left: 30%; animation-delay: 4s;"></div>
+    <div class="particle" style="left: 40%; animation-delay: 6s;"></div>
+    <div class="particle" style="left: 50%; animation-delay: 8s;"></div>
+    <div class="particle" style="left: 60%; animation-delay: 10s;"></div>
+    <div class="particle" style="left: 70%; animation-delay: 12s;"></div>
+    <div class="particle" style="left: 80%; animation-delay: 14s;"></div>
+    <div class="particle" style="left: 90%; animation-delay: 16s;"></div>
+  </div>
+
+  <div class="main-container">
+    <!-- Logo/Title -->
+    <div class="logo-section">
+      <h1 class="logo-title">JcubHub Books</h1>
+      <p class="logo-subtitle">Your Digital Library Awaits</p>
+    </div>
+
+    <!-- Main split cards -->
+    <div class="split" id="mainSplit">
+      <div class="card request-card" onclick="showRequestForm()">
+        <div class="card-content">
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+              <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/>
+            </svg>
+          </div>
+          <h2>Request</h2>
+          <p class="card-description">Can't find a book? Let us know!</p>
+        </div>
+      </div>
+
+      <div class="card download-card" onclick="showLoginInfoPopup()">
+        <div class="card-content">
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+              <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+            </svg>
+          </div>
+          <h2>Download</h2>
+          <p class="card-description">Browse our collection</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      © 2024 JcubHub Books. All rights reserved.
+    </div>
+  </div>
+
+  <!-- Request form overlay -->
+  <div class="request-form-container" id="requestFormContainer">
+    <button class="back-button" onclick="hideRequestForm()">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
+      </svg>
+      Back
+    </button>
+
+    <div class="form-wrapper">
+      <h2 class="form-title">Request a Book</h2>
+      <p class="form-subtitle">Can't find what you're looking for? Let us know!</p>
+
+      <form id="bookRequestForm" onsubmit="handleSubmit(event)">
+        <div class="form-group">
+          <label for="name">Your Name *</label>
+          <input type="text" id="name" name="name" required placeholder="John Doe" autocomplete="name">
+        </div>
+
+        <div class="form-group">
+          <label for="email">Email Address *</label>
+          <input type="email" id="email" name="email" required placeholder="john@example.com" autocomplete="email">
+        </div>
+
+        <div class="form-group">
+          <label for="bookTitle">Book Title *</label>
+          <input type="text" id="bookTitle" name="bookTitle" required placeholder="Enter the book title">
+        </div>
+
+        <div class="form-group">
+          <label for="author">Author</label>
+          <input type="text" id="author" name="author" placeholder="Book author (if known)">
+        </div>
+
+        <div class="form-group">
+          <label for="isbn">ISBN</label>
+          <input type="text" id="isbn" name="isbn" placeholder="ISBN (if known)">
+        </div>
+
+        <div class="form-group">
+          <label for="category">Category</label>
+          <select id="category" name="category">
+            <option value="">Select a category</option>
+            <option value="fiction">Fiction</option>
+            <option value="non-fiction">Non-Fiction</option>
+            <option value="academic">Academic/Textbook</option>
+            <option value="technical">Technical/Programming</option>
+            <option value="biography">Biography</option>
+            <option value="self-help">Self-Help</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="additionalInfo">Additional Information</label>
+          <textarea id="additionalInfo" name="additionalInfo" placeholder="Any additional details that might help us find this book..."></textarea>
+        </div>
+
+        <!-- Cloudflare Turnstile widget -->
+        <div class="turnstile-container">
+          <div
+            class="cf-turnstile"
+            data-sitekey="0x4AAAAAABznZ0it4DVwFAV4"
+            data-theme="dark">
+          </div>
+        </div>
+
+        <button type="submit" class="submit-button">Submit Request</button>
+      </form>
+
+      <div class="success-message" id="successMessage">
+        ✓ Your request has been submitted successfully! We'll get back to you soon.
+      </div>
+    </div>
+  </div>
+
+  <!-- Login info popup -->
+  <div class="login-info-popup" id="loginInfoPopup">
+    <div class="popup-content">
+      <div class="popup-icon">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+        </svg>
+      </div>
+      <h2 class="popup-title">Login Information Changed</h2>
+      <p class="popup-message">
+        Please note: The login credentials have been updated.<br><br>
+        <strong>Username:</strong> books<br>
+		<strong>Password:</strong> Books123!
+      </p>
+      <div class="popup-buttons">
+<button class="popup-button popup-button-primary" onclick="proceedToDownload()">Continue to Download</button>
+        <button class="popup-button popup-button-secondary" onclick="hideLoginInfoPopup()">Go Back</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function showRequestForm() {
+      document.getElementById('requestFormContainer').classList.add('active');
+      document.body.style.overflow = 'hidden';
+      document.getElementById('requestFormContainer').scrollTop = 0;
+    }
+
+    function hideRequestForm() {
+      document.getElementById('requestFormContainer').classList.remove('active');
+      document.body.style.overflow = '';
+      document.getElementById('bookRequestForm').reset();
+      document.getElementById('successMessage').classList.remove('show');
+      if (window.turnstile && typeof window.turnstile.reset === 'function') {
+        window.turnstile.reset();
+      }
+    }
+
+    function showLoginInfoPopup() {
+      document.getElementById('loginInfoPopup').classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function hideLoginInfoPopup() {
+      document.getElementById('loginInfoPopup').classList.remove('active');
+      document.body.style.overflow = '';
+    }
+
+    function proceedToDownload() {
+      window.open('https://cwa.jcubhub.com', '_blank', 'noopener,noreferrer');
+      hideLoginInfoPopup();
+    }
+
+    async function handleSubmit(event) {
+      event.preventDefault();
+      const form = event.target;
+      const submitButton = form.querySelector('.submit-button');
+      const originalText = submitButton.textContent;
+      submitButton.textContent = 'Submitting...';
+      submitButton.disabled = true;
+      const fd = new FormData(form);
+      const payload = {
+        name: (fd.get('name') || '').trim(),
+        email: (fd.get('email') || '').trim(),
+        bookTitle: (fd.get('bookTitle') || '').trim(),
+        author: (fd.get('author') || '').trim(),
+        isbn: (fd.get('isbn') || '').trim(),
+        category: ((fd.get('category') || 'other').toString().trim().toLowerCase()),
+        additionalInfo: (fd.get('additionalInfo') || '').trim(),
+        turnstileToken: fd.get('cf-turnstile-response') || ''
+      };
+      try {
+        const response = await fetch('/api/book-request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        if (response.ok && result.success) {
+          document.getElementById('successMessage').classList.add('show');
+          form.reset();
+          if (window.turnstile && typeof window.turnstile.reset === 'function') {
+            window.turnstile.reset();
+          }
+          setTimeout(() => {
+            document.getElementById('successMessage').classList.remove('show');
+            hideRequestForm();
+          }, 3000);
+        } else {
+          const messages = (result?.errors && Array.isArray(result.errors) && result.errors.map(e => e.msg || e).join('\n')) || result?.message || 'There was an error submitting your request. Please try again.';
+          alert(messages);
+          if (window.turnstile && typeof window.turnstile.reset === 'function') {
+            window.turnstile.reset();
+          }
+        }
+      } catch (error) {
+        console.error('Error:', error);
+        alert('Unable to submit request. Please check your connection and try again.');
+        if (window.turnstile && typeof window.turnstile.reset === 'function') {
+          window.turnstile.reset();
+        }
+      } finally {
+        submitButton.textContent = originalText;
+        submitButton.disabled = false;
+      }
+    }
+
+    document.addEventListener('keydown', function(event) {
+      if (event.key === 'Escape') {
+        if (document.getElementById('loginInfoPopup').classList.contains('active')) {
+          hideLoginInfoPopup();
+        } else if (document.getElementById('requestFormContainer').classList.contains('active')) {
+          hideRequestForm();
+        }
+      }
+    });
+  </script>
+</body>
+</html>

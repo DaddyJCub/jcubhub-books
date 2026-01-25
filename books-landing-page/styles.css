@@ -1,0 +1,119 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body, html {
+  height: 100%;
+  font-family: 'Segoe UI', sans-serif;
+  background: #111;
+  color: #fff;
+}
+
+.split {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  height: 100vh;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.01);
+  box-shadow: 0 0 30px rgba(255,255,255,0.05) inset;
+}
+
+/* Optional soft divider line */
+.split::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  background: rgba(255,255,255,0.05);
+  z-index: 3;
+}
+
+.half {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-size: cover;
+  background-position: center;
+  overflow: hidden;
+  transition: all 0.4s ease-in-out;
+}
+
+/* Frosted glass overlay */
+.half::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  transition: backdrop-filter 0.3s ease, background 0.3s ease;
+  z-index: 1;
+}
+
+/* Intensify blur on hover */
+.half:hover::before {
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* Modern glass-style box */
+.half h1 {
+  font-size: 2.8rem;
+  font-weight: 600;
+  background: rgba(0, 0, 0, 0.4);
+  padding: 20px 50px;
+  border-radius: 12px;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  transition: all 0.3s ease-in-out;
+  z-index: 2;
+  position: relative;
+  text-align: center;
+}
+
+/* Subtext appears on hover */
+.half:hover h1::after {
+  content: attr(data-hover);
+  display: block;
+  font-size: 1.1rem;
+  font-weight: 400;
+  margin-top: 10px;
+  color: rgba(255, 255, 255, 0.8);
+  opacity: 1;
+  transition: opacity 0.3s ease;
+}
+
+/* LEFT SIDE: grayscale image, no hover effect */
+.request {
+  background-image: url('img/request.png');
+  filter: grayscale(100%);
+  cursor: not-allowed;
+}
+
+/* RIGHT SIDE: grayscale by default, full color on hover */
+.download {
+  background-image: url('img/download.png'); /* Replace with your colorized image */
+  filter: grayscale(100%);
+  transition: filter 0.4s ease-in-out;
+  cursor: pointer;
+}
+
+.download:hover {
+  filter: grayscale(0%);
+}
+
+/* Anchor style */
+a.download {
+  text-decoration: none;
+  color: white;
+}
