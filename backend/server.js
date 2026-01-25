@@ -545,10 +545,27 @@ async function addBookToReadarr(bookData) {
     });
 
     if (response.ok) {
-      return { success: true, data: await response.json() };
+      const data = await response.json();
+      logger.info('Book added to Readarr successfully', { 
+        bookTitle: bookData.bookTitle,
+        readarrBookId: data.id 
+      });
+      return { success: true, data };
     } else {
-      const errorData = await response.json();
-      return { success: false, error: errorData.message || 'Failed to add book' };
+      const errorText = await response.text();
+      let errorMessage = 'Failed to add book';
+      try {
+        const errorData = JSON.parse(errorText);
+        errorMessage = errorData.message || errorData[0]?.errorMessage || JSON.stringify(errorData);
+      } catch {
+        errorMessage = errorText || `HTTP ${response.status}`;
+      }
+      logger.error('Readarr add book failed', { 
+        bookTitle: bookData.bookTitle,
+        status: response.status,
+        error: errorMessage 
+      });
+      return { success: false, error: errorMessage };
     }
   } catch (error) {
     logger.error('Readarr add book error', { error: error.message });
@@ -684,11 +701,6 @@ app.post('/api/book-request',
           <p style="margin: 0; font-size: 14px; color: #86868b;">Request ID</p>
           <p style="margin: 5px 0 0 0; font-size: 18px; font-weight: 600; color: #667eea;">${id}</p>
         </div>
-        ${cwaAvailable ? `
-        <div style="background: #f0fdf4; border-left: 4px solid #22c55e; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
-          <p style="margin: 0; font-size: 14px; color: #166534;">✓ Good news! This book may already be available in our library.</p>
-        </div>
-        ` : ''}
         <p style="margin: 20px 0 0 0; font-size: 16px; color: #1d1d1f;">We'll notify you when your request is processed.</p>
         <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b;">Best regards,<br><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
       `;
@@ -733,7 +745,7 @@ app.post('/api/book-request',
           <tr>
             <td style="padding: 10px 0;">
               <span style="color: #86868b; font-size: 14px;">CWA Available</span><br>
-              <span style="color: ${cwaAvailable ? '#166534' : '#dc2626'}; font-size: 16px; font-weight: 600;">${cwaAvailable ? '✓ Yes' : '✗ No'}</span>
+              <span style="color: #dc2626; font-size: 16px; font-weight: 600;">✗ No</span>
             </td>
           </tr>
         </table>
@@ -748,7 +760,7 @@ app.post('/api/book-request',
       success: true,
       requestId: id,
       message: 'Your book request has been submitted successfully!',
-      cwaAvailable
+      cwaAvailable: false
     });
 
     logger.info('Book request submitted', { 
@@ -756,12 +768,12 @@ app.post('/api/book-request',
       bookTitle, 
       author, 
       format,
-      cwaAvailable,
+      cwaAvailable: false,
       notifyOnComplete: notifyOnComplete !== false
     });
 
-    // Auto-add to Readarr if enabled and book not already in CWA
-    if (automation.autoAddToReadarr && !cwaAvailable && integrations.readarr) {
+    // Auto-add to Readarr if enabled (book is not in CWA since we checked above)
+    if (automation.autoAddToReadarr && integrations.readarr) {
       try {
         logger.info('Auto-adding to Readarr...', { requestId: id, bookTitle, isbn });
         const readarrResult = await addBookToReadarr({ bookTitle, author, isbn });
