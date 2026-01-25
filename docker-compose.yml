@@ -1,27 +1,26 @@
 version: '3.8'
 
 services:
-  frontend:
-    image: nginx:alpine
-    container_name: jcubhub-books-frontend
-    ports:
-      - "3003:3003"
-    volumes:
-      - ./books-landing-page:/usr/share/nginx/html:ro
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
-    depends_on:
-      - backend
-    restart: unless-stopped
-
-  backend:
+  jcubhub-books:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: jcubhub-books-backend
+    container_name: jcubhub-books
     ports:
-      - "3002:3002"
+      - "3003:3003"
     volumes:
+      # Persist SQLite database
       - ./backend/data:/app/data
+      # Mount public assets (allows live updates during dev)
+      - ./backend/public:/app/public:ro
     env_file:
       - .env
+    environment:
+      - PORT=3003
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3003/api/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s

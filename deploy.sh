@@ -1,5 +1,7 @@
 #!/bin/bash
-# deploy.sh - Complete deployment script for JcubHub Books
+# deploy.sh - Deployment script for JcubHub Books v2.0
+
+set -e
 
 echo "🚀 Starting JcubHub Books Deployment..."
 
@@ -9,60 +11,105 @@ if ! command -v docker &> /dev/null; then
     exit 1
 fi
 
-if ! command -v docker-compose &> /dev/null; then
+if ! command -v docker compose &> /dev/null && ! command -v docker-compose &> /dev/null; then
     echo "❌ Docker Compose is not installed. Please install Docker Compose first."
     exit 1
 fi
 
-# Create project structure
+# Determine docker compose command
+COMPOSE_CMD="docker compose"
+if ! command -v docker compose &> /dev/null; then
+    COMPOSE_CMD="docker-compose"
+fi
+
+# Create necessary directories
 echo "📁 Creating project structure..."
-mkdir -p books-landing-page/{img,css,js}
-mkdir -p backend
-mkdir -p ssl
+mkdir -p backend/data
+mkdir -p backend/public/css
+mkdir -p backend/public/img
 
 # Check if .env file exists
 if [ ! -f .env ]; then
     echo "⚠️  .env file not found. Creating from template..."
-    cat > .env << 'EOF'
-EMAIL_USER=your-email@gmail.com
-EMAIL_PASS=your-app-specific-password
-MONGO_USER=admin
-MONGO_PASS=secure-password-here
-MONGODB_URI=mongodb://admin:secure-password-here@mongodb:27017/jcubhub-books?authSource=admin
-NODE_ENV=production
-PORT=3001
+    
+    if [ -f .env.example ]; then
+        cp .env.example .env
+        echo "📝 Created .env from .env.example"
+    else
+        cat > .env << 'EOF'
+# JcubHub Books Configuration
+PORT=3003
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=changeme
+JWT_SECRET=$(openssl rand -base64 32)
 ADMIN_EMAIL=admin@jcubhub.com
+ZOHO_EMAIL=
+ZOHO_PASSWORD=
+TURNSTILE_SECRET_KEY=
+READARR_URL=
+READARR_API_KEY=
+CWA_URL=https://cwa.jcubhub.com
+CWA_USERNAME=
+CWA_PASSWORD=
 EOF
-    echo "📝 Please edit .env file with your actual credentials"
-    read -p "Press enter to continue after editing .env file..."
+    fi
+    
+    echo ""
+    echo "⚠️  Please edit .env file with your actual credentials before continuing."
+    read -p "Press Enter to continue after editing .env file..."
 fi
 
-# Build and start containers
-echo "🐳 Building Docker containers..."
-docker-compose build
+# Stop existing containers
+echo "🛑 Stopping existing containers..."
+$COMPOSE_CMD down 2>/dev/null || true
 
+# Build containers
+echo "🐳 Building Docker containers..."
+$COMPOSE_CMD build --no-cache
+
+# Start services
 echo "🚀 Starting services..."
-docker-compose up -d
+$COMPOSE_CMD up -d
 
 # Wait for services to be ready
 echo "⏳ Waiting for services to start..."
-sleep 10
+sleep 5
+
+# Health check
+echo "🏥 Running health check..."
+for i in {1..10}; do
+    if curl -sf http://localhost:3003/api/health > /dev/null 2>&1; then
+        echo "✅ Health check passed!"
+        break
+    fi
+    if [ $i -eq 10 ]; then
+        echo "⚠️  Health check taking longer than expected..."
+    fi
+    sleep 2
+done
 
 # Check if services are running
-if docker-compose ps | grep -q "Up"; then
-    echo "✅ Services are running!"
+if $COMPOSE_CMD ps | grep -q "running\|Up"; then
+    echo ""
+    echo "✅ Deployment successful!"
     echo ""
     echo "📊 Service Status:"
-    docker-compose ps
+    $COMPOSE_CMD ps
     echo ""
     echo "🌐 Your application is now available at:"
-    echo "   Frontend: http://books.jcubhub.com"
-    echo "   Backend API: http://books.jcubhub.com/api"
+    echo "   Main Site:      http://localhost:3003"
+    echo "   Admin Panel:    http://localhost:3003/admin"
+    echo "   API Health:     http://localhost:3003/api/health"
     echo ""
-    echo "📝 Logs can be viewed with: docker-compose logs -f"
+    echo "📝 Useful commands:"
+    echo "   View logs:      $COMPOSE_CMD logs -f"
+    echo "   Stop services:  $COMPOSE_CMD down"
+    echo "   Restart:        $COMPOSE_CMD restart"
+    echo ""
 else
-    echo "❌ Some services failed to start. Check logs with: docker-compose logs"
+    echo "❌ Some services failed to start."
+    echo "Check logs with: $COMPOSE_CMD logs"
     exit 1
 fi
 
-echo "✨ Deployment complete!"
+echo "✨ JcubHub Books v2.0 is ready!"

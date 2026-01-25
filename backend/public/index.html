@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JcubHub Books</title>
+  <link rel="stylesheet" href="css/styles.css">
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+</head>
+<body>
+  <!-- Particles Background -->
+  <div class="particles" id="particles"></div>
+
+  <!-- Logo Section -->
+  <div class="logo-section">
+    <h1 class="logo-title">JcubHub Books</h1>
+    <p class="logo-subtitle">Your personal book request & library portal</p>
+  </div>
+
+  <!-- Main Container -->
+  <div class="main-container">
+    <div class="split">
+      <!-- Request Card -->
+      <div class="card request-card" onclick="showRequestForm()">
+        <div class="card-content">
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+              <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/>
+            </svg>
+          </div>
+          <h2>Request a Book</h2>
+          <p class="card-description">Submit a request for books you'd like added to the library</p>
+        </div>
+      </div>
+
+      <!-- Download Card -->
+      <div class="card download-card" onclick="showLoginInfo()">
+        <div class="card-content">
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+              <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+            </svg>
+          </div>
+          <h2>Download Books</h2>
+          <p class="card-description">Access the library to browse and download available books</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <p>© 2024 JcubHub Books</p>
+  </div>
+
+  <!-- Request Form Overlay -->
+  <div class="request-form-container" id="requestFormContainer">
+    <button class="back-button" onclick="hideRequestForm()">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
+      </svg>
+      Back
+    </button>
+    
+    <div class="form-wrapper">
+      <h2 class="form-title">Request a Book</h2>
+      <p class="form-subtitle">Fill out the form below and we'll try to add your book to the library</p>
+      
+      <form id="requestForm" onsubmit="submitRequest(event)">
+        <div class="form-group">
+          <label for="requesterName">Your Name</label>
+          <input type="text" id="requesterName" name="requesterName" placeholder="Enter your name" required>
+        </div>
+
+        <div class="form-group">
+          <label for="requesterEmail">Your Email</label>
+          <input type="email" id="requesterEmail" name="requesterEmail" placeholder="Enter your email address" required>
+        </div>
+
+        <div class="form-group">
+          <label for="bookTitle">Book Title</label>
+          <input type="text" id="bookTitle" name="bookTitle" placeholder="Enter the book title" required>
+        </div>
+
+        <div class="form-group">
+          <label for="author">Author</label>
+          <input type="text" id="author" name="author" placeholder="Enter the author's name" required>
+        </div>
+
+        <div class="form-group">
+          <label for="format">Preferred Format</label>
+          <select id="format" name="format" required>
+            <option value="">Select a format</option>
+            <option value="epub">EPUB</option>
+            <option value="pdf">PDF</option>
+            <option value="mobi">MOBI</option>
+            <option value="any">Any Format</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="notes">Additional Notes (Optional)</label>
+          <textarea id="notes" name="notes" placeholder="Any additional information (ISBN, specific edition, etc.)"></textarea>
+        </div>
+
+        <div class="form-group checkbox-group">
+          <input type="checkbox" id="notifyOnComplete" name="notifyOnComplete" checked>
+          <label for="notifyOnComplete">Notify me by email when my book request is completed</label>
+        </div>
+
+        <!-- Cloudflare Turnstile Widget -->
+        <div class="turnstile-container">
+          <div class="cf-turnstile" data-sitekey="0x4AAAAAABBZZZZz0qyA8eZE" data-callback="onTurnstileSuccess" data-expired-callback="onTurnstileExpired"></div>
+        </div>
+
+        <button type="submit" class="submit-button" id="submitBtn" disabled>
+          Submit Request
+        </button>
+
+        <div class="success-message" id="successMessage">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor" style="color: var(--success); margin-bottom: 10px;">
+            <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+          </svg>
+          <p>Your book request has been submitted successfully!</p>
+          <p style="margin-top: 10px; font-size: 0.9rem; color: var(--text-muted);">We'll review your request and notify you when the book is available.</p>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Login Info Popup -->
+  <div class="login-info-popup" id="loginInfoPopup">
+    <div class="popup-content">
+      <div class="popup-icon">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-6h2v6zm0-8h-2V7h2v4z"/>
+        </svg>
+      </div>
+      <h3 class="popup-title">Calibre Web Automated</h3>
+      <p class="popup-message">
+        You will be redirected to our book library. Please log in with your provided credentials to browse and download books.
+        <br><br>
+        If you don't have credentials yet, please contact the administrator.
+      </p>
+      <div class="popup-buttons">
+        <button class="popup-button popup-button-primary" onclick="goToLibrary()">Go to Library</button>
+        <button class="popup-button popup-button-secondary" onclick="hideLoginInfo()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Particle generation
+    function createParticles() {
+      const container = document.getElementById('particles');
+      const particleCount = 50;
+      
+      for (let i = 0; i < particleCount; i++) {
+        const particle = document.createElement('div');
+        particle.classList.add('particle');
+        particle.style.left = Math.random() * 100 + '%';
+        particle.style.animationDelay = Math.random() * 20 + 's';
+        particle.style.animationDuration = (15 + Math.random() * 10) + 's';
+        container.appendChild(particle);
+      }
+    }
+    
+    createParticles();
+
+    // Turnstile token
+    let turnstileToken = null;
+
+    function onTurnstileSuccess(token) {
+      turnstileToken = token;
+      document.getElementById('submitBtn').disabled = false;
+    }
+
+    function onTurnstileExpired() {
+      turnstileToken = null;
+      document.getElementById('submitBtn').disabled = true;
+    }
+
+    // Form visibility
+    function showRequestForm() {
+      document.getElementById('requestFormContainer').classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function hideRequestForm() {
+      document.getElementById('requestFormContainer').classList.remove('active');
+      document.body.style.overflow = '';
+      resetForm();
+    }
+
+    function showLoginInfo() {
+      document.getElementById('loginInfoPopup').classList.add('active');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function hideLoginInfo() {
+      document.getElementById('loginInfoPopup').classList.remove('active');
+      document.body.style.overflow = '';
+    }
+
+    function goToLibrary() {
+      window.open('https://cwa.jcubhub.com', '_blank');
+      hideLoginInfo();
+    }
+
+    function resetForm() {
+      document.getElementById('requestForm').reset();
+      document.getElementById('successMessage').classList.remove('show');
+      document.getElementById('submitBtn').disabled = true;
+      // Reset Turnstile
+      if (typeof turnstile !== 'undefined') {
+        turnstile.reset();
+      }
+      turnstileToken = null;
+    }
+
+    // Form submission
+    async function submitRequest(event) {
+      event.preventDefault();
+      
+      const submitBtn = document.getElementById('submitBtn');
+      const form = document.getElementById('requestForm');
+      const successMessage = document.getElementById('successMessage');
+      
+      if (!turnstileToken) {
+        alert('Please complete the captcha verification.');
+        return;
+      }
+      
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Submitting...';
+      
+      const formData = {
+        requesterName: document.getElementById('requesterName').value.trim(),
+        requesterEmail: document.getElementById('requesterEmail').value.trim(),
+        bookTitle: document.getElementById('bookTitle').value.trim(),
+        author: document.getElementById('author').value.trim(),
+        format: document.getElementById('format').value,
+        notes: document.getElementById('notes').value.trim(),
+        notifyOnComplete: document.getElementById('notifyOnComplete').checked,
+        turnstileToken: turnstileToken
+      };
+      
+      try {
+        const response = await fetch('/api/book-request', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(formData)
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+          // Hide form fields and show success message
+          const formGroups = form.querySelectorAll('.form-group, .turnstile-container, .submit-button');
+          formGroups.forEach(el => el.style.display = 'none');
+          successMessage.classList.add('show');
+          
+          // Auto-close after 5 seconds
+          setTimeout(() => {
+            hideRequestForm();
+            // Restore form fields visibility
+            formGroups.forEach(el => el.style.display = '');
+          }, 5000);
+        } else {
+          alert(result.error || 'Failed to submit request. Please try again.');
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Submit Request';
+          // Reset Turnstile on error
+          if (typeof turnstile !== 'undefined') {
+            turnstile.reset();
+          }
+          turnstileToken = null;
+        }
+      } catch (error) {
+        console.error('Error submitting request:', error);
+        alert('Failed to submit request. Please check your connection and try again.');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Submit Request';
+        // Reset Turnstile on error
+        if (typeof turnstile !== 'undefined') {
+          turnstile.reset();
+        }
+        turnstileToken = null;
+      }
+    }
+
+    // Close overlays on Escape key
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') {
+        hideRequestForm();
+        hideLoginInfo();
+      }
+    });
+
+    // Close overlay when clicking outside
+    document.getElementById('requestFormContainer').addEventListener('click', function(e) {
+      if (e.target === this) {
+        hideRequestForm();
+      }
+    });
+
+    document.getElementById('loginInfoPopup').addEventListener('click', function(e) {
+      if (e.target === this) {
+        hideLoginInfo();
+      }
+    });
+  </script>
+</body>
+</html>
