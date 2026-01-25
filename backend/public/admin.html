@@ -513,7 +513,10 @@
     <section class="requests-section" id="readarrPanel" style="margin-bottom: 20px; display: none;">
       <div class="section-header">
         <h2 class="section-title">📥 Readarr Download Queue</h2>
-        <button class="btn btn-secondary" id="refreshQueueBtn">Refresh</button>
+        <div style="display: flex; gap: 10px;">
+          <button class="btn btn-secondary" id="testReadarrBtn" title="Test Readarr search with a sample book">🧪 Test Readarr</button>
+          <button class="btn btn-secondary" id="refreshQueueBtn">Refresh</button>
+        </div>
       </div>
       <div id="readarrQueueContent">
         <div class="loading"><div class="spinner"></div></div>
@@ -802,6 +805,41 @@
       }
     }
 
+    // Test Readarr connection and search
+    async function testReadarr() {
+      const title = prompt('Enter book title to test:');
+      if (!title) return;
+      
+      const author = prompt('Enter author name:');
+      if (!author) return;
+      
+      const isbn = prompt('Enter ISBN (optional, press Cancel to skip):') || '';
+      
+      showToast('Testing Readarr connection...', '');
+      
+      try {
+        const response = await apiCall('/api/admin/readarr/test', {
+          method: 'POST',
+          body: JSON.stringify({ title, author, isbn })
+        });
+        const result = await response.json();
+        
+        if (!result.configured) {
+          showToast('⚠️ ' + result.message, 'error');
+        } else if (result.success) {
+          if (result.bookFound) {
+            showToast(`✅ Readarr v${result.readarrVersion} - Found: "${result.bookFound.title}" by ${result.bookFound.authorName}`, 'success');
+          } else {
+            showToast(`✅ Readarr v${result.readarrVersion} is working! No exact match found for "${title}"`, 'success');
+          }
+        } else {
+          showToast('❌ ' + result.message, 'error');
+        }
+      } catch (error) {
+        showToast('Failed to test Readarr: ' + error.message, 'error');
+      }
+    }
+
     async function completeAllInProgress() {
       if (!confirm('This will mark ALL searching/downloading requests as completed and notify users. Continue?')) return;
       
@@ -1005,8 +1043,15 @@
             <option value="rejected" ${req.status === 'rejected' ? 'selected' : ''}>Rejected</option>
             <option value="unavailable" ${req.status === 'unavailable' ? 'selected' : ''}>Unavailable</option>
           </select>
-          <textarea class="form-group" id="statusNotes" placeholder="Add a note (optional)" style="width: 100%; min-height: 80px; padding: 12px; background: var(--bg-input); border: 1px solid var(--border-medium); border-radius: var(--radius-md); color: var(--text-primary); margin-bottom: 15px;"></textarea>
+          <textarea class="form-group" id="statusNotes" placeholder="Add a note (optional, shown in rejection email)" style="width: 100%; min-height: 80px; padding: 12px; background: var(--bg-input); border: 1px solid var(--border-medium); border-radius: var(--radius-md); color: var(--text-primary); margin-bottom: 15px;"></textarea>
           <button class="btn btn-primary btn-full" id="updateStatusBtn" data-id="${req.id}">Update Status</button>
+          
+          <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--border-light);">
+            <button class="btn btn-secondary btn-full" data-action="force-readarr" data-id="${req.id}" style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);">
+              📚 Force Add to Readarr
+            </button>
+            <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 8px; text-align: center;">Use this if CWA found a wrong match</p>
+          </div>
 
           <div class="history-list">
             <h4 style="margin-bottom: 15px;">Status History</h4>
@@ -1073,6 +1118,41 @@
         }
       } catch (error) {
         showToast('Failed to add to Readarr', 'error');
+      }
+    }
+
+    // Force add to Readarr (bypass CWA check)
+    async function forceAddToReadarr(id) {
+      if (!confirm('This will add the book to Readarr regardless of CWA availability. Continue?')) return;
+      
+      showToast('Force adding to Readarr...', '');
+      
+      try {
+        const response = await apiCall(`/api/admin/requests/${id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ 
+            status: 'searching', 
+            addToReadarr: true,
+            notes: 'Force added to Readarr (bypassed CWA check)'
+          })
+        });
+
+        const result = await response.json();
+        
+        if (response.ok) {
+          if (result.readarrResult?.success) {
+            showToast('Force added to Readarr successfully!', 'success');
+            closeModal();
+          } else {
+            showToast('Failed to add to Readarr: ' + (result.readarrResult?.error || 'Unknown error'), 'error');
+          }
+          loadRequests();
+          loadStats();
+        } else {
+          showToast(result.error || 'Failed to force add', 'error');
+        }
+      } catch (error) {
+        showToast('Failed to force add to Readarr', 'error');
       }
     }
 
@@ -1241,6 +1321,7 @@
     document.getElementById('logoutBtn').addEventListener('click', logout);
     document.getElementById('modalCloseBtn').addEventListener('click', closeModal);
     document.getElementById('refreshQueueBtn')?.addEventListener('click', loadReadarrQueue);
+    document.getElementById('testReadarrBtn')?.addEventListener('click', testReadarr);
     
     // Quick filter by clicking on pending stat
     document.getElementById('pendingCard')?.addEventListener('click', () => {
@@ -1267,6 +1348,8 @@
         quickComplete(target.dataset.id);
       } else if (target.matches('[data-action="delete"]')) {
         deleteRequest(target.dataset.id);
+      } else if (target.matches('[data-action="force-readarr"]')) {
+        forceAddToReadarr(target.dataset.id);
       } else if (target.matches('#updateStatusBtn')) {
         updateStatus(target.dataset.id);
       }

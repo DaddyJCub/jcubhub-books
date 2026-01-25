@@ -375,7 +375,7 @@ function generateReadarrUrl(author, bookTitle, isbn) {
 
 async function checkCwaAvailability(bookTitle, author) {
   if (!process.env.CWA_URL || !process.env.CWA_USERNAME || !process.env.CWA_PASSWORD) {
-    return false;
+    return { available: false };
   }
 
   try {
@@ -386,16 +386,33 @@ async function checkCwaAvailability(bookTitle, author) {
       }
     });
 
-    if (!response.ok) return false;
+    if (!response.ok) return { available: false };
 
     const xml = await response.text();
     // Simple check for entries - a proper implementation would parse the OPDS XML
     const found = xml.includes('<entry>') && xml.toLowerCase().includes(author.toLowerCase());
-    logger.debug('CWA availability check', { bookTitle, author, found });
-    return found;
+    
+    // Try to extract book ID from OPDS response for direct link
+    let bookLink = null;
+    if (found) {
+      // Look for the book detail link in OPDS - usually in <id> or <link> tags
+      const idMatch = xml.match(/<id>urn:uuid:([^<]+)<\/id>/);
+      const linkMatch = xml.match(/href="\/book\/(\d+)/);
+      if (linkMatch) {
+        bookLink = `${process.env.CWA_URL}/book/${linkMatch[1]}`;
+      } else if (idMatch) {
+        // Fallback to search page
+        bookLink = `${process.env.CWA_URL}/search?query=${encodeURIComponent(bookTitle)}`;
+      } else {
+        bookLink = `${process.env.CWA_URL}/search?query=${encodeURIComponent(bookTitle)}`;
+      }
+    }
+    
+    logger.debug('CWA availability check', { bookTitle, author, found, bookLink });
+    return { available: found, bookLink };
   } catch (error) {
     logger.error('CWA availability check error', { bookTitle, error: error.message });
-    return false;
+    return { available: false };
   }
 }
 
@@ -557,18 +574,27 @@ app.post('/api/book-request',
       return res.status(409).json({ error: 'You have already submitted a request for this book recently.' });
     }
 
+    // Check CWA availability FIRST - if available, don't create request
+    const cwaCheck = await checkCwaAvailability(bookTitle, author);
+    
+    if (cwaCheck.available) {
+      logger.info('Book already available in CWA, blocking request', { bookTitle, author });
+      return res.status(200).json({ 
+        alreadyAvailable: true,
+        message: 'Great news! This book is already available in our library.',
+        bookLink: cwaCheck.bookLink || process.env.CWA_URL
+      });
+    }
+
     const now = new Date().toISOString();
     const id = generateId();
     const readarrUrl = generateReadarrUrl(author, bookTitle, isbn);
 
-    // Check CWA availability
-    const cwaAvailable = await checkCwaAvailability(bookTitle, author);
-
-    // Insert request
+    // Insert request (cwa_available is false since we checked above)
     db.prepare(`
       INSERT INTO requests (id, requester_name, requester_email, book_title, author, isbn, format, notes, status, notify_on_complete, readarr_url, cwa_available, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
-    `).run(id, requesterName, requesterEmail, bookTitle, author, isbn || null, format, notes || '', notifyOnComplete !== false ? 1 : 0, readarrUrl, cwaAvailable ? 1 : 0, now, now);
+    `).run(id, requesterName, requesterEmail, bookTitle, author, isbn || null, format, notes || '', notifyOnComplete !== false ? 1 : 0, readarrUrl, 0, now, now);
 
     // Add initial status history
     db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
@@ -827,24 +853,96 @@ app.patch('/api/admin/requests/:id',
         }
       }
 
-      // Send notification email if status is completed and user opted in
-      if (status === 'completed' && request.notify_on_complete) {
+      // Send notification emails based on status (if user opted in)
+      if (request.notify_on_complete) {
         const cwaLink = process.env.CWA_URL || 'https://cwa.jcubhub.com';
-        const readyEmailContent = `
-          <div style="text-align: center; margin-bottom: 30px;">
-            <span style="font-size: 48px;">🎉</span>
-          </div>
-          <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Great News! Your Book is Ready</h2>
-          <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
-          <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
-            Your requested book "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} is now available in our library!
-          </p>
-          <div style="text-align: center; margin: 30px 0;">
-            <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
-          </div>
-          <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b; text-align: center;">Happy reading!<br><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
-        `;
-        await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrapEmailHtml(readyEmailContent, 'Your Book is Ready'));
+        let emailContent = null;
+        let emailSubject = null;
+        let emailTitle = null;
+        
+        if (status === 'completed') {
+          emailSubject = 'Your Book is Ready! - JcubHub Books';
+          emailTitle = 'Your Book is Ready';
+          emailContent = `
+            <div style="text-align: center; margin-bottom: 30px;">
+              <span style="font-size: 48px;">🎉</span>
+            </div>
+            <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Great News! Your Book is Ready</h2>
+            <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+            <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
+              Your requested book "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} is now available in our library!
+            </p>
+            <div style="text-align: center; margin: 30px 0;">
+              <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
+            </div>
+            <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b; text-align: center;">Happy reading!<br><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
+          `;
+        } else if (status === 'approved' || status === 'searching') {
+          emailSubject = 'Book Request Approved - JcubHub Books';
+          emailTitle = 'Request Approved';
+          emailContent = `
+            <div style="text-align: center; margin-bottom: 30px;">
+              <span style="font-size: 48px;">✅</span>
+            </div>
+            <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Your Request Has Been Approved!</h2>
+            <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+            <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
+              Great news! Your request for "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} has been approved.
+            </p>
+            <div style="background: #f0f0ff; border-left: 4px solid #667eea; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
+              <p style="margin: 0; font-size: 14px; color: #86868b;">What happens next?</p>
+              <p style="margin: 5px 0 0 0; font-size: 16px; color: #1d1d1f;">We're now searching for your book. You'll receive another email when it's ready to download.</p>
+            </div>
+            <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b; text-align: center;">Thank you for your patience!<br><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
+          `;
+        } else if (status === 'rejected') {
+          emailSubject = 'Book Request Update - JcubHub Books';
+          emailTitle = 'Request Update';
+          const rejectionReason = notes || 'The book could not be added to our library at this time.';
+          emailContent = `
+            <div style="text-align: center; margin-bottom: 30px;">
+              <span style="font-size: 48px;">📚</span>
+            </div>
+            <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Update on Your Book Request</h2>
+            <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+            <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
+              We've reviewed your request for "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author}.
+            </p>
+            <div style="background: #fef2f2; border-left: 4px solid #ef4444; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
+              <p style="margin: 0; font-size: 14px; color: #991b1b;">Unfortunately, we're unable to fulfill this request:</p>
+              <p style="margin: 5px 0 0 0; font-size: 16px; color: #1d1d1f;">${rejectionReason}</p>
+            </div>
+            <p style="margin: 20px 0 0 0; font-size: 16px; color: #1d1d1f;">Feel free to submit another request for a different book anytime.</p>
+            <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b; text-align: center;"><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
+          `;
+        } else if (status === 'unavailable') {
+          emailSubject = 'Book Unavailable - JcubHub Books';
+          emailTitle = 'Book Unavailable';
+          emailContent = `
+            <div style="text-align: center; margin-bottom: 30px;">
+              <span style="font-size: 48px;">😔</span>
+            </div>
+            <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Book Currently Unavailable</h2>
+            <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+            <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
+              We searched extensively but couldn't find "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} in any of our sources.
+            </p>
+            <div style="background: #fffbeb; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
+              <p style="margin: 0; font-size: 16px; color: #1d1d1f;">This could be because the book is very new, rare, or has limited digital availability. We'll keep trying if new sources become available.</p>
+            </div>
+            <p style="margin: 20px 0 0 0; font-size: 16px; color: #1d1d1f;">Feel free to check back or request another book.</p>
+            <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b; text-align: center;"><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
+          `;
+        }
+        
+        if (emailContent && emailSubject) {
+          try {
+            await sendEmail(request.requester_email, emailSubject, wrapEmailHtml(emailContent, emailTitle));
+            logger.info('Status notification email sent', { requestId: req.params.id, status, email: request.requester_email });
+          } catch (emailError) {
+            logger.error('Failed to send status notification email', { error: emailError.message, requestId: req.params.id });
+          }
+        }
       }
 
       logger.info('Request status updated', { 
@@ -1051,6 +1149,75 @@ app.get('/api/admin/readarr/search', authenticateToken, async (req, res) => {
   res.json({ results: result ? [result] : [] });
 });
 
+// Test Readarr integration - search without adding
+app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
+  const { title, author, isbn } = req.body;
+  
+  if (!title || !author) {
+    return res.status(400).json({ error: 'Title and author are required' });
+  }
+
+  try {
+    // Check if Readarr is configured
+    if (!process.env.READARR_URL || !process.env.READARR_API_KEY) {
+      return res.json({ 
+        success: false, 
+        message: 'Readarr is not configured (READARR_URL and READARR_API_KEY required)',
+        configured: false
+      });
+    }
+
+    // Test connection to Readarr
+    const testResponse = await fetch(`${process.env.READARR_URL}/api/v1/system/status`, {
+      headers: { 'X-Api-Key': process.env.READARR_API_KEY }
+    });
+    
+    if (!testResponse.ok) {
+      return res.json({ 
+        success: false, 
+        message: `Readarr connection failed: ${testResponse.status} ${testResponse.statusText}`,
+        configured: true
+      });
+    }
+
+    const readarrStatus = await testResponse.json();
+
+    // Search for the book
+    const result = await searchReadarr(title, author, isbn || '');
+    
+    if (result) {
+      res.json({
+        success: true,
+        message: 'Readarr is working! Book found.',
+        configured: true,
+        readarrVersion: readarrStatus.version,
+        bookFound: {
+          title: result.title,
+          authorName: result.authorName,
+          foreignBookId: result.foreignBookId,
+          overview: result.overview?.substring(0, 200) + (result.overview?.length > 200 ? '...' : '')
+        }
+      });
+    } else {
+      res.json({
+        success: true,
+        message: 'Readarr is working, but no book found with those search terms.',
+        configured: true,
+        readarrVersion: readarrStatus.version,
+        bookFound: null,
+        searchTerms: { title, author, isbn: isbn || '(none)' }
+      });
+    }
+  } catch (error) {
+    logger.error('Readarr test error', { error: error.message });
+    res.json({ 
+      success: false, 
+      message: `Error testing Readarr: ${error.message}`,
+      configured: true
+    });
+  }
+});
+
 // Add book to Readarr
 app.post('/api/admin/readarr/add', authenticateToken, async (req, res) => {
   const { requestId } = req.body;
@@ -1161,9 +1328,9 @@ app.post('/api/admin/sync-cwa', authenticateToken, async (req, res) => {
   let updatedCount = 0;
 
   for (const request of requests) {
-    const available = await checkCwaAvailability(request.book_title, request.author);
+    const cwaCheck = await checkCwaAvailability(request.book_title, request.author);
     
-    if (available && !request.cwa_available) {
+    if (cwaCheck.available && !request.cwa_available) {
       db.prepare("UPDATE requests SET cwa_available = 1, status = 'completed', updated_at = ? WHERE id = ?").run(now, request.id);
       db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
         request.id, 'completed', now, 'Book found in CWA library during sync'
@@ -1257,9 +1424,9 @@ app.listen(PORT, () => {
         const now = new Date().toISOString();
 
         for (const request of requests) {
-          const available = await checkCwaAvailability(request.book_title, request.author);
+          const cwaCheck = await checkCwaAvailability(request.book_title, request.author);
           
-          if (available && !request.cwa_available) {
+          if (cwaCheck.available && !request.cwa_available) {
             db.prepare("UPDATE requests SET cwa_available = 1, status = 'completed', updated_at = ? WHERE id = ?").run(now, request.id);
             db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
               request.id, 'completed', now, 'Auto-completed: Book found in CWA during scheduled sync'

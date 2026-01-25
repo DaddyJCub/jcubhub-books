@@ -287,7 +287,38 @@
         const result = await response.json();
         
         if (response.ok) {
-          // Hide form fields and show success message
+          // Check if book is already available in library
+          if (result.alreadyAvailable) {
+            // Show "already available" message with link
+            const formGroups = form.querySelectorAll('.form-group, .turnstile-container, .submit-button');
+            formGroups.forEach(el => el.style.display = 'none');
+            successMessage.innerHTML = `
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor" style="color: var(--success); margin-bottom: 10px;">
+                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+              </svg>
+              <p style="font-size: 1.1rem; font-weight: 600; color: var(--success);">Great news!</p>
+              <p style="margin-top: 10px;">This book is already available in our library.</p>
+              <a href="${result.bookLink}" target="_blank" class="submit-button" style="display: inline-block; margin-top: 20px; text-decoration: none;">
+                📚 Go to Library
+              </a>
+            `;
+            successMessage.classList.add('show');
+            
+            setTimeout(() => {
+              hideRequestForm();
+              formGroups.forEach(el => el.style.display = '');
+              successMessage.innerHTML = `
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor" style="color: var(--success); margin-bottom: 10px;">
+                  <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                </svg>
+                <p>Your book request has been submitted successfully!</p>
+                <p style="margin-top: 10px; font-size: 0.9rem; color: var(--text-muted);">We'll review your request and notify you when the book is available.</p>
+              `;
+            }, 8000);
+            return;
+          }
+          
+          // Normal success - request submitted
           const formGroups = form.querySelectorAll('.form-group, .turnstile-container, .submit-button');
           formGroups.forEach(el => el.style.display = 'none');
           successMessage.classList.add('show');
