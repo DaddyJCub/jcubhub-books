@@ -527,6 +527,54 @@ async function addBookToReadarr(bookData) {
       return { success: false, error: 'Book not found in Readarr' };
     }
 
+    // Get quality profiles
+    const profilesResponse = await fetch(`${process.env.READARR_URL}/api/v1/qualityprofile`, {
+      headers: { 'X-Api-Key': process.env.READARR_API_KEY }
+    });
+    if (!profilesResponse.ok) {
+      return { success: false, error: 'Failed to fetch quality profiles from Readarr' };
+    }
+    const profiles = await profilesResponse.json();
+    if (!profiles.length) {
+      return { success: false, error: 'No quality profiles configured in Readarr' };
+    }
+
+    // Get metadata profiles
+    const metadataResponse = await fetch(`${process.env.READARR_URL}/api/v1/metadataprofile`, {
+      headers: { 'X-Api-Key': process.env.READARR_API_KEY }
+    });
+    if (!metadataResponse.ok) {
+      return { success: false, error: 'Failed to fetch metadata profiles from Readarr' };
+    }
+    const metadataProfiles = await metadataResponse.json();
+    if (!metadataProfiles.length) {
+      return { success: false, error: 'No metadata profiles configured in Readarr' };
+    }
+
+    // Get root folders
+    const rootFolderResponse = await fetch(`${process.env.READARR_URL}/api/v1/rootfolder`, {
+      headers: { 'X-Api-Key': process.env.READARR_API_KEY }
+    });
+    if (!rootFolderResponse.ok) {
+      return { success: false, error: 'Failed to fetch root folders from Readarr' };
+    }
+    const rootFolders = await rootFolderResponse.json();
+    if (!rootFolders.length) {
+      return { success: false, error: 'No root folders configured in Readarr' };
+    }
+
+    // Use first profile and root folder (or allow override via env)
+    const qualityProfileId = parseInt(process.env.READARR_QUALITY_PROFILE_ID) || profiles[0].id;
+    const metadataProfileId = parseInt(process.env.READARR_METADATA_PROFILE_ID) || metadataProfiles[0].id;
+    const rootFolderPath = process.env.READARR_ROOT_FOLDER || rootFolders[0].path;
+
+    logger.info('Adding book to Readarr', {
+      bookTitle: bookData.bookTitle,
+      qualityProfileId,
+      metadataProfileId,
+      rootFolderPath
+    });
+
     // Add the book to Readarr
     const response = await fetch(`${process.env.READARR_URL}/api/v1/book`, {
       method: 'POST',
@@ -536,6 +584,9 @@ async function addBookToReadarr(bookData) {
       },
       body: JSON.stringify({
         ...searchResult,
+        qualityProfileId,
+        metadataProfileId,
+        rootFolderPath,
         monitored: true,
         addOptions: {
           monitor: 'all',
