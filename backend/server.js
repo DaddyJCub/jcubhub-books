@@ -16,6 +16,51 @@ const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3003;
+const LOG_LEVEL = process.env.LOG_LEVEL || 'info'; // debug, info, warn, error
+
+// ============================================
+// Logging Utility
+// ============================================
+
+const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
+
+function log(level, message, meta = {}) {
+  if (LOG_LEVELS[level] >= LOG_LEVELS[LOG_LEVEL]) {
+    const timestamp = new Date().toISOString();
+    const metaStr = Object.keys(meta).length > 0 ? ` | ${JSON.stringify(meta)}` : '';
+    console.log(`[${timestamp}] [${level.toUpperCase()}] ${message}${metaStr}`);
+  }
+}
+
+const logger = {
+  debug: (msg, meta) => log('debug', msg, meta),
+  info: (msg, meta) => log('info', msg, meta),
+  warn: (msg, meta) => log('warn', msg, meta),
+  error: (msg, meta) => log('error', msg, meta)
+};
+
+// ============================================
+// Startup Logging
+// ============================================
+
+logger.info('='.repeat(50));
+logger.info('JcubHub Books Server Starting...');
+logger.info('='.repeat(50));
+logger.info('Environment Configuration:', {
+  PORT,
+  LOG_LEVEL,
+  NODE_ENV: process.env.NODE_ENV || 'development'
+});
+
+// Log which integrations are configured
+const integrations = {
+  email: !!(process.env.ZOHO_EMAIL && process.env.ZOHO_PASSWORD),
+  turnstile: !!process.env.TURNSTILE_SECRET_KEY,
+  readarr: !!(process.env.READARR_URL && process.env.READARR_API_KEY),
+  cwa: !!(process.env.CWA_URL && process.env.CWA_USERNAME && process.env.CWA_PASSWORD),
+  adminConfigured: !!(process.env.ADMIN_USERNAME && process.env.ADMIN_PASSWORD)
+};
+logger.info('Integrations Status:', integrations);
 
 // Initialize SQLite database
 const dbPath = path.join(__dirname, 'data', 'books.db');
@@ -70,11 +115,46 @@ function initDatabase() {
       passwordHash,
       new Date().toISOString()
     );
-    console.log('Default admin user created');
+    logger.info('Default admin user created', { username: process.env.ADMIN_USERNAME });
   }
+  
+  // Log database stats
+  const requestCount = db.prepare('SELECT COUNT(*) as count FROM requests').get();
+  const adminCount = db.prepare('SELECT COUNT(*) as count FROM admin_users').get();
+  logger.info('Database initialized', { 
+    path: dbPath, 
+    requests: requestCount.count, 
+    admins: adminCount.count 
+  });
 }
 
 initDatabase();
+
+// Request logging middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  const requestId = crypto.randomBytes(4).toString('hex');
+  req.requestId = requestId;
+  
+  // Log request
+  logger.debug(`--> ${req.method} ${req.path}`, { 
+    requestId, 
+    ip: req.ip,
+    userAgent: req.get('User-Agent')?.substring(0, 50)
+  });
+  
+  // Log response when finished
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    const level = res.statusCode >= 400 ? 'warn' : 'debug';
+    logger[level](`<-- ${req.method} ${req.path} ${res.statusCode}`, { 
+      requestId, 
+      duration: `${duration}ms` 
+    });
+  });
+  
+  next();
+});
 
 // Security middleware with CSP for Turnstile
 app.use(helmet({
@@ -138,11 +218,12 @@ function generateId() {
 
 async function verifyTurnstile(token) {
   if (!process.env.TURNSTILE_SECRET_KEY) {
-    console.warn('TURNSTILE_SECRET_KEY not configured, skipping verification');
+    logger.warn('TURNSTILE_SECRET_KEY not configured, skipping verification');
     return true;
   }
 
   try {
+    logger.debug('Verifying Turnstile token');
     const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -152,16 +233,17 @@ async function verifyTurnstile(token) {
       })
     });
     const data = await response.json();
+    logger.debug('Turnstile verification result', { success: data.success });
     return data.success;
   } catch (error) {
-    console.error('Turnstile verification error:', error);
+    logger.error('Turnstile verification error', { error: error.message });
     return false;
   }
 }
 
 async function sendEmail(to, subject, html) {
   if (!transporter) {
-    console.log('Email not configured, skipping:', subject);
+    logger.debug('Email not configured, skipping', { subject });
     return;
   }
 
@@ -172,10 +254,63 @@ async function sendEmail(to, subject, html) {
       subject,
       html
     });
-    console.log('Email sent:', subject);
+    logger.info('Email sent successfully', { to, subject });
   } catch (error) {
-    console.error('Email error:', error);
+    logger.error('Email send failed', { to, subject, error: error.message });
   }
+}
+
+// Styled email template wrapper
+function wrapEmailHtml(content, title = 'JcubHub Books') {
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${title}</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #0a0a0a; color: #ffffff;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 100%); min-height: 100vh;">
+    <tr>
+      <td align="center" style="padding: 40px 20px;">
+        <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="max-width: 600px; width: 100%;">
+          <!-- Header -->
+          <tr>
+            <td align="center" style="padding-bottom: 30px;">
+              <h1 style="margin: 0; font-size: 28px; font-weight: 700; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">
+                📚 JcubHub Books
+              </h1>
+            </td>
+          </tr>
+          
+          <!-- Main Content Card -->
+          <tr>
+            <td>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background: rgba(255, 255, 255, 0.05); border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.1); backdrop-filter: blur(10px);">
+                <tr>
+                  <td style="padding: 40px;">
+                    ${content}
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          
+          <!-- Footer -->
+          <tr>
+            <td align="center" style="padding-top: 30px;">
+              <p style="margin: 0; font-size: 12px; color: rgba(255, 255, 255, 0.5);">
+                © ${new Date().getFullYear()} JcubHub Books • Your Personal Library
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
 }
 
 function generateReadarrUrl(author, bookTitle) {
@@ -201,9 +336,11 @@ async function checkCwaAvailability(bookTitle, author) {
 
     const xml = await response.text();
     // Simple check for entries - a proper implementation would parse the OPDS XML
-    return xml.includes('<entry>') && xml.toLowerCase().includes(author.toLowerCase());
+    const found = xml.includes('<entry>') && xml.toLowerCase().includes(author.toLowerCase());
+    logger.debug('CWA availability check', { bookTitle, author, found });
+    return found;
   } catch (error) {
-    console.error('CWA availability check error:', error);
+    logger.error('CWA availability check error', { bookTitle, error: error.message });
     return false;
   }
 }
@@ -224,9 +361,10 @@ async function searchReadarr(bookTitle, author) {
     if (!response.ok) return null;
 
     const books = await response.json();
+    logger.debug('Readarr search result', { bookTitle, author, found: books.length });
     return books.length > 0 ? books[0] : null;
   } catch (error) {
-    console.error('Readarr search error:', error);
+    logger.error('Readarr search error', { bookTitle, author, error: error.message });
     return null;
   }
 }
@@ -297,12 +435,26 @@ function authenticateToken(req, res, next) {
 // Public Routes
 // ============================================
 
-// Health check
+// Health check with debug info
 app.get('/api/health', (req, res) => {
+  const requestCount = db.prepare('SELECT COUNT(*) as count FROM requests').get();
+  const pendingCount = db.prepare("SELECT COUNT(*) as count FROM requests WHERE status = 'pending'").get();
+  
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    version: '2.0.0'
+    version: '2.0.0',
+    uptime: Math.floor(process.uptime()) + 's',
+    integrations: {
+      email: !!(process.env.ZOHO_EMAIL && process.env.ZOHO_PASSWORD),
+      turnstile: !!process.env.TURNSTILE_SECRET_KEY,
+      readarr: !!(process.env.READARR_URL && process.env.READARR_API_KEY),
+      cwa: !!(process.env.CWA_URL && process.env.CWA_USERNAME && process.env.CWA_PASSWORD)
+    },
+    database: {
+      totalRequests: requestCount.count,
+      pendingRequests: pendingCount.count
+    }
   });
 });
 
@@ -366,30 +518,74 @@ app.post('/api/book-request',
 
     // Send confirmation email if opted in
     if (notifyOnComplete !== false) {
-      await sendEmail(requesterEmail, 'Book Request Received - JcubHub Books', `
-        <h2>Book Request Received</h2>
-        <p>Hi ${requesterName},</p>
-        <p>We've received your request for "<strong>${bookTitle}</strong>" by ${author}.</p>
-        <p>Request ID: <strong>${id}</strong></p>
-        ${cwaAvailable ? '<p style="color: green;">Good news! This book may already be available in our library. Check CWA!</p>' : ''}
-        <p>We'll notify you when your request is processed.</p>
-        <br>
-        <p>Best regards,<br>JcubHub Books</p>
-      `);
+      const emailContent = `
+        <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #ffffff;">Book Request Received</h2>
+        <p style="margin: 0 0 15px 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">Hi ${requesterName},</p>
+        <p style="margin: 0 0 15px 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">
+          We've received your request for "<strong style="color: #667eea;">${bookTitle}</strong>" by ${author}.
+        </p>
+        <div style="background: rgba(102, 126, 234, 0.1); border-left: 4px solid #667eea; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
+          <p style="margin: 0; font-size: 14px; color: rgba(255, 255, 255, 0.7);">Request ID</p>
+          <p style="margin: 5px 0 0 0; font-size: 18px; font-weight: 600; color: #667eea;">${id}</p>
+        </div>
+        ${cwaAvailable ? `
+        <div style="background: rgba(34, 197, 94, 0.1); border-left: 4px solid #22c55e; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
+          <p style="margin: 0; font-size: 14px; color: #22c55e;">✓ Good news! This book may already be available in our library.</p>
+        </div>
+        ` : ''}
+        <p style="margin: 20px 0 0 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">We'll notify you when your request is processed.</p>
+        <p style="margin: 30px 0 0 0; font-size: 14px; color: rgba(255, 255, 255, 0.6);">Best regards,<br><strong style="color: #ffffff;">JcubHub Books</strong></p>
+      `;
+      await sendEmail(requesterEmail, 'Book Request Received - JcubHub Books', wrapEmailHtml(emailContent, 'Book Request Received'));
     }
 
     // Send admin notification
     if (process.env.ADMIN_EMAIL) {
-      await sendEmail(process.env.ADMIN_EMAIL, 'New Book Request - JcubHub Books', `
-        <h2>New Book Request</h2>
-        <p><strong>ID:</strong> ${id}</p>
-        <p><strong>From:</strong> ${requesterName} (${requesterEmail})</p>
-        <p><strong>Book:</strong> ${bookTitle} by ${author}</p>
-        <p><strong>Format:</strong> ${format}</p>
-        <p><strong>Notes:</strong> ${notes || 'None'}</p>
-        <p><strong>CWA Available:</strong> ${cwaAvailable ? 'Yes' : 'No'}</p>
-        ${readarrUrl ? `<p><a href="${readarrUrl}">Search in Readarr</a></p>` : ''}
-      `);
+      const adminEmailContent = `
+        <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #ffffff;">📬 New Book Request</h2>
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin: 20px 0;">
+          <tr>
+            <td style="padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.1);">
+              <span style="color: rgba(255, 255, 255, 0.6); font-size: 14px;">Request ID</span><br>
+              <span style="color: #667eea; font-size: 16px; font-weight: 600;">${id}</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.1);">
+              <span style="color: rgba(255, 255, 255, 0.6); font-size: 14px;">From</span><br>
+              <span style="color: #ffffff; font-size: 16px;">${requesterName} (${requesterEmail})</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.1);">
+              <span style="color: rgba(255, 255, 255, 0.6); font-size: 14px;">Book</span><br>
+              <span style="color: #ffffff; font-size: 16px;"><strong>${bookTitle}</strong> by ${author}</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.1);">
+              <span style="color: rgba(255, 255, 255, 0.6); font-size: 14px;">Format</span><br>
+              <span style="color: #ffffff; font-size: 16px;">${format.toUpperCase()}</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.1);">
+              <span style="color: rgba(255, 255, 255, 0.6); font-size: 14px;">Notes</span><br>
+              <span style="color: #ffffff; font-size: 16px;">${notes || 'None'}</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 10px 0;">
+              <span style="color: rgba(255, 255, 255, 0.6); font-size: 14px;">CWA Available</span><br>
+              <span style="color: ${cwaAvailable ? '#22c55e' : '#ef4444'}; font-size: 16px; font-weight: 600;">${cwaAvailable ? '✓ Yes' : '✗ No'}</span>
+            </td>
+          </tr>
+        </table>
+        ${readarrUrl ? `
+        <a href="${readarrUrl}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: 600; font-size: 14px; margin-top: 10px;">Search in Readarr →</a>
+        ` : ''}
+      `;
+      await sendEmail(process.env.ADMIN_EMAIL, 'New Book Request - JcubHub Books', wrapEmailHtml(adminEmailContent, 'New Book Request'));
     }
 
     res.status(201).json({
@@ -397,6 +593,15 @@ app.post('/api/book-request',
       requestId: id,
       message: 'Your book request has been submitted successfully!',
       cwaAvailable
+    });
+
+    logger.info('Book request submitted', { 
+      requestId: id, 
+      bookTitle, 
+      author, 
+      format,
+      cwaAvailable,
+      notifyOnComplete: notifyOnComplete !== false
     });
   }
 );
@@ -426,11 +631,13 @@ app.post('/api/auth/login',
 
     const validPassword = await bcrypt.compare(password, user.password_hash);
     if (!validPassword) {
+      logger.warn('Failed login attempt', { username, ip: req.ip });
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
     const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '24h' });
 
+    logger.info('Admin login successful', { username, ip: req.ip });
     res.json({ token, username: user.username });
   }
 );
@@ -521,15 +728,29 @@ app.patch('/api/admin/requests/:id',
       // Send notification email if status is completed and user opted in
       if (status === 'completed' && request.notify_on_complete) {
         const cwaLink = process.env.CWA_URL || 'https://cwa.jcubhub.com';
-        await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', `
-          <h2>Great News! Your Book is Ready</h2>
-          <p>Hi ${request.requester_name},</p>
-          <p>Your requested book "<strong>${request.book_title}</strong>" by ${request.author} is now available!</p>
-          <p>You can download it from our library at <a href="${cwaLink}">CWA</a>.</p>
-          <br>
-          <p>Happy reading!<br>JcubHub Books</p>
-        `);
+        const readyEmailContent = `
+          <div style="text-align: center; margin-bottom: 30px;">
+            <span style="font-size: 48px;">🎉</span>
+          </div>
+          <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #ffffff; text-align: center;">Great News! Your Book is Ready</h2>
+          <p style="margin: 0 0 15px 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">Hi ${request.requester_name},</p>
+          <p style="margin: 0 0 20px 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">
+            Your requested book "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} is now available in our library!
+          </p>
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
+          </div>
+          <p style="margin: 30px 0 0 0; font-size: 14px; color: rgba(255, 255, 255, 0.6); text-align: center;">Happy reading!<br><strong style="color: #ffffff;">JcubHub Books</strong></p>
+        `;
+        await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrapEmailHtml(readyEmailContent, 'Your Book is Ready'));
       }
+
+      logger.info('Request status updated', { 
+        requestId: req.params.id, 
+        oldStatus: request.status, 
+        newStatus: status,
+        admin: req.user.username
+      });
     }
 
     const updated = db.prepare('SELECT * FROM requests WHERE id = ?').get(req.params.id);
@@ -539,12 +760,19 @@ app.patch('/api/admin/requests/:id',
 
 // Delete request
 app.delete('/api/admin/requests/:id', authenticateToken, (req, res) => {
+  const request = db.prepare('SELECT * FROM requests WHERE id = ?').get(req.params.id);
   const result = db.prepare('DELETE FROM requests WHERE id = ?').run(req.params.id);
   
   if (result.changes === 0) {
     return res.status(404).json({ error: 'Request not found' });
   }
 
+  logger.info('Request deleted', { 
+    requestId: req.params.id, 
+    bookTitle: request?.book_title,
+    admin: req.user.username
+  });
+  
   res.json({ success: true, message: 'Request deleted' });
 });
 
@@ -646,14 +874,21 @@ app.post('/api/webhook/book-complete',
         // Send notification if opted in
         if (request.notify_on_complete) {
           const cwaLink = process.env.CWA_URL || 'https://cwa.jcubhub.com';
-          await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', `
-            <h2>Great News! Your Book is Ready</h2>
-            <p>Hi ${request.requester_name},</p>
-            <p>Your requested book "<strong>${request.book_title}</strong>" by ${request.author} is now available!</p>
-            <p>You can download it from our library at <a href="${cwaLink}">CWA</a>.</p>
-            <br>
-            <p>Happy reading!<br>JcubHub Books</p>
-          `);
+          const webhookEmailContent = `
+            <div style="text-align: center; margin-bottom: 30px;">
+              <span style="font-size: 48px;">🎉</span>
+            </div>
+            <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #ffffff; text-align: center;">Great News! Your Book is Ready</h2>
+            <p style="margin: 0 0 15px 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">Hi ${request.requester_name},</p>
+            <p style="margin: 0 0 20px 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">
+              Your requested book "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} is now available in our library!
+            </p>
+            <div style="text-align: center; margin: 30px 0;">
+              <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
+            </div>
+            <p style="margin: 30px 0 0 0; font-size: 14px; color: rgba(255, 255, 255, 0.6); text-align: center;">Happy reading!<br><strong style="color: #ffffff;">JcubHub Books</strong></p>
+          `;
+          await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrapEmailHtml(webhookEmailContent, 'Your Book is Ready'));
         }
       }
 
@@ -690,14 +925,21 @@ app.post('/api/admin/sync-cwa', authenticateToken, async (req, res) => {
       // Send notification if opted in
       if (request.notify_on_complete) {
         const cwaLink = process.env.CWA_URL || 'https://cwa.jcubhub.com';
-        await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', `
-          <h2>Great News! Your Book is Ready</h2>
-          <p>Hi ${request.requester_name},</p>
-          <p>Your requested book "<strong>${request.book_title}</strong>" by ${request.author} is now available!</p>
-          <p>You can download it from our library at <a href="${cwaLink}">CWA</a>.</p>
-          <br>
-          <p>Happy reading!<br>JcubHub Books</p>
-        `);
+        const syncEmailContent = `
+          <div style="text-align: center; margin-bottom: 30px;">
+            <span style="font-size: 48px;">🎉</span>
+          </div>
+          <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #ffffff; text-align: center;">Great News! Your Book is Ready</h2>
+          <p style="margin: 0 0 15px 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">Hi ${request.requester_name},</p>
+          <p style="margin: 0 0 20px 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">
+            Your requested book "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} is now available in our library!
+          </p>
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
+          </div>
+          <p style="margin: 30px 0 0 0; font-size: 14px; color: rgba(255, 255, 255, 0.6); text-align: center;">Happy reading!<br><strong style="color: #ffffff;">JcubHub Books</strong></p>
+        `;
+        await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrapEmailHtml(syncEmailContent, 'Your Book is Ready'));
       }
 
       updatedCount++;
@@ -729,17 +971,34 @@ app.get('{*splat}', (req, res) => {
 // ============================================
 
 app.listen(PORT, () => {
-  console.log(`JcubHub Books server running on port ${PORT}`);
-  console.log(`Static files served from: ${path.join(__dirname, 'public')}`);
+  logger.info('='.repeat(50));
+  logger.info('Server Started Successfully!');
+  logger.info('='.repeat(50));
+  logger.info(`Listening on port ${PORT}`);
+  logger.info(`Static files: ${path.join(__dirname, 'public')}`);
+  logger.info(`Health check: http://localhost:${PORT}/api/health`);
+  logger.info(`Admin panel: http://localhost:${PORT}/admin`);
 });
 
 // Graceful shutdown
 process.on('SIGINT', () => {
+  logger.info('Received SIGINT, shutting down gracefully...');
   db.close();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
+  logger.info('Received SIGTERM, shutting down gracefully...');
   db.close();
   process.exit(0);
+});
+
+// Unhandled error logging
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught Exception', { error: error.message, stack: error.stack });
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Unhandled Rejection', { reason: String(reason) });
 });
