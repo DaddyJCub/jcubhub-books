@@ -572,8 +572,70 @@ async function addBookToReadarr(bookData) {
       bookTitle: bookData.bookTitle,
       qualityProfileId,
       metadataProfileId,
-      rootFolderPath
+      rootFolderPath,
+      foreignBookId: searchResult.foreignBookId,
+      authorName: searchResult.author?.authorName || searchResult.authorName
     });
+
+    // Check if author exists, if not add them first
+    let authorId = searchResult.author?.id;
+    
+    if (!authorId && searchResult.author) {
+      // Need to add author first
+      const authorToAdd = {
+        ...searchResult.author,
+        qualityProfileId: qualityProfileId,
+        metadataProfileId: metadataProfileId,
+        rootFolderPath: rootFolderPath,
+        monitored: true,
+        addOptions: {
+          monitor: 'all',
+          searchForMissingBooks: false
+        }
+      };
+      
+      logger.info('Adding author to Readarr first', { authorName: searchResult.author.authorName });
+      
+      const authorResponse = await fetch(`${process.env.READARR_URL}/api/v1/author`, {
+        method: 'POST',
+        headers: {
+          'X-Api-Key': process.env.READARR_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(authorToAdd)
+      });
+      
+      if (authorResponse.ok) {
+        const addedAuthor = await authorResponse.json();
+        authorId = addedAuthor.id;
+        logger.info('Author added to Readarr', { authorId, authorName: addedAuthor.authorName });
+      } else {
+        const authorError = await authorResponse.text();
+        // Author might already exist - try to continue anyway
+        logger.warn('Author add response', { status: authorResponse.status, error: authorError });
+      }
+    }
+
+    // Build the book object
+    const bookToAdd = {
+      ...searchResult,
+      qualityProfileId: qualityProfileId,
+      metadataProfileId: metadataProfileId,
+      rootFolderPath: rootFolderPath,
+      authorId: authorId || searchResult.author?.id || 0,
+      monitored: true,
+      addOptions: {
+        monitor: 'all',
+        searchForNewBook: true
+      }
+    };
+    
+    // Ensure author has profiles set
+    if (bookToAdd.author) {
+      bookToAdd.author.qualityProfileId = qualityProfileId;
+      bookToAdd.author.metadataProfileId = metadataProfileId;
+      bookToAdd.author.rootFolderPath = rootFolderPath;
+    }
 
     // Add the book to Readarr
     const response = await fetch(`${process.env.READARR_URL}/api/v1/book`, {
@@ -582,17 +644,7 @@ async function addBookToReadarr(bookData) {
         'X-Api-Key': process.env.READARR_API_KEY,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        ...searchResult,
-        qualityProfileId,
-        metadataProfileId,
-        rootFolderPath,
-        monitored: true,
-        addOptions: {
-          monitor: 'all',
-          searchForNewBook: true
-        }
-      })
+      body: JSON.stringify(bookToAdd)
     });
 
     if (response.ok) {
