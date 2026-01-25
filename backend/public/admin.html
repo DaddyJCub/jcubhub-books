@@ -564,6 +564,34 @@
   <!-- Toast -->
   <div class="toast" id="toast"></div>
 
+  <!-- Readarr Test Modal -->
+  <div class="modal" id="readarrTestModal">
+    <div class="modal-content" style="max-width: 800px;">
+      <div class="modal-header">
+        <h3 class="modal-title">🧪 Readarr Search Test</h3>
+        <button class="modal-close" id="readarrTestCloseBtn">&times;</button>
+      </div>
+      <div id="readarrTestBody">
+        <div style="display: grid; gap: 15px; margin-bottom: 20px;">
+          <div>
+            <label style="display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 5px;">Book Title *</label>
+            <input type="text" id="testTitle" placeholder="e.g., The Martian" style="width: 100%; padding: 12px; background: var(--bg-input); border: 1px solid var(--border-medium); border-radius: var(--radius-md); color: var(--text-primary);">
+          </div>
+          <div>
+            <label style="display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 5px;">Author *</label>
+            <input type="text" id="testAuthor" placeholder="e.g., Andy Weir" style="width: 100%; padding: 12px; background: var(--bg-input); border: 1px solid var(--border-medium); border-radius: var(--radius-md); color: var(--text-primary);">
+          </div>
+          <div>
+            <label style="display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 5px;">ISBN (optional)</label>
+            <input type="text" id="testIsbn" placeholder="e.g., 978-0553418026" style="width: 100%; padding: 12px; background: var(--bg-input); border: 1px solid var(--border-medium); border-radius: var(--radius-md); color: var(--text-primary);">
+          </div>
+          <button class="btn btn-primary" id="runReadarrTestBtn">🔍 Search Readarr</button>
+        </div>
+        <div id="readarrTestResults"></div>
+      </div>
+    </div>
+  </div>
+
   <script>
     // State
     let authToken = localStorage.getItem('adminToken');
@@ -805,17 +833,37 @@
       }
     }
 
-    // Test Readarr connection and search
-    async function testReadarr() {
-      const title = prompt('Enter book title to test:');
-      if (!title) return;
+    // Test Readarr - open modal
+    function testReadarr() {
+      document.getElementById('readarrTestModal').classList.add('active');
+      document.getElementById('testTitle').value = '';
+      document.getElementById('testAuthor').value = '';
+      document.getElementById('testIsbn').value = '';
+      document.getElementById('readarrTestResults').innerHTML = `
+        <div style="text-align: center; padding: 40px; color: var(--text-muted);">
+          <p>Enter book details above and click Search to test Readarr integration.</p>
+          <p style="font-size: 12px; margin-top: 10px;">Results will show all matches with scoring breakdown.</p>
+        </div>
+      `;
+      document.getElementById('testTitle').focus();
+    }
+    
+    function closeReadarrTestModal() {
+      document.getElementById('readarrTestModal').classList.remove('active');
+    }
+    
+    async function runReadarrTest() {
+      const title = document.getElementById('testTitle').value.trim();
+      const author = document.getElementById('testAuthor').value.trim();
+      const isbn = document.getElementById('testIsbn').value.trim();
       
-      const author = prompt('Enter author name:');
-      if (!author) return;
+      if (!title || !author) {
+        showToast('Title and author are required', 'error');
+        return;
+      }
       
-      const isbn = prompt('Enter ISBN (optional, press Cancel to skip):') || '';
-      
-      showToast('Testing Readarr connection...', '');
+      const resultsDiv = document.getElementById('readarrTestResults');
+      resultsDiv.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
       
       try {
         const response = await apiCall('/api/admin/readarr/test', {
@@ -824,30 +872,114 @@
         });
         const result = await response.json();
         
-        // Always log full result to console for debugging
-        console.log('Readarr Test Result:', result);
-        console.log('Search used:', result.searchUsed || result.searchTerms?.queryUsed);
-        if (result.bookFound) {
-          console.log('Book found:', result.bookFound);
-        }
+        // Log to console for easy copying
+        console.log('=== READARR TEST RESULTS ===');
+        console.log(JSON.stringify(result, null, 2));
         
         if (!result.configured) {
-          showToast('⚠️ ' + result.message, 'error');
-        } else if (result.success) {
-          if (result.bookFound) {
-            const matchWarning = result.bookFound.title.toLowerCase() !== title.toLowerCase() 
-              ? ' ⚠️ Title differs from search!' 
-              : '';
-            showToast(`✅ Found: "${result.bookFound.title}" by ${result.bookFound.authorName}${matchWarning} (Query: ${result.searchUsed})`, 'success');
-            alert(`Readarr Test Results\n\nSearched for: "${title}" by ${author}${isbn ? ` (ISBN: ${isbn})` : ''}\nQuery used: ${result.searchUsed}\n\nFound:\n• Title: ${result.bookFound.title}\n• Author: ${result.bookFound.authorName}\n• GoodReads ID: ${result.bookFound.foreignBookId}\n• Release: ${result.bookFound.releaseDate || 'Unknown'}\n\n${result.bookFound.overview || ''}\n\nCheck browser console (F12) for full details.`);
-          } else {
-            showToast(`✅ Readarr v${result.readarrVersion} working, but no results for: ${result.searchTerms?.queryUsed}`, 'success');
-          }
-        } else {
-          showToast('❌ ' + result.message, 'error');
+          resultsDiv.innerHTML = `
+            <div style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 12px; padding: 20px; text-align: center;">
+              <span style="font-size: 32px;">⚠️</span>
+              <p style="color: #fca5a5; margin-top: 10px;">${result.message}</p>
+            </div>
+          `;
+          return;
         }
+        
+        if (!result.success) {
+          resultsDiv.innerHTML = `
+            <div style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 12px; padding: 20px; text-align: center;">
+              <span style="font-size: 32px;">❌</span>
+              <p style="color: #fca5a5; margin-top: 10px;">${result.message}</p>
+            </div>
+          `;
+          return;
+        }
+        
+        // Build results display
+        let html = `
+          <div style="background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.3); border-radius: 12px; padding: 15px; margin-bottom: 15px;">
+            <div style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+              <span style="color: #22c55e;">✅ Readarr v${result.readarrVersion} connected</span>
+              <span style="color: var(--text-muted); font-size: 12px;">Query: "${escapeHtml(result.searchQuery)}"</span>
+            </div>
+            <div style="margin-top: 10px; font-size: 12px; color: var(--text-muted);">
+              Total results: ${result.totalResults} | Showing top ${result.results.length}
+            </div>
+          </div>
+        `;
+        
+        if (result.results.length === 0) {
+          html += `
+            <div style="text-align: center; padding: 40px; color: var(--text-muted);">
+              <span style="font-size: 48px;">📭</span>
+              <p style="margin-top: 15px;">No results found for this search.</p>
+            </div>
+          `;
+        } else {
+          html += `<div style="display: flex; flex-direction: column; gap: 10px;">`;
+          
+          result.results.forEach((book, idx) => {
+            const isSelected = book.isSelected;
+            const bgColor = isSelected ? 'rgba(102, 126, 234, 0.15)' : 'var(--bg-card)';
+            const borderColor = isSelected ? 'rgba(102, 126, 234, 0.5)' : 'var(--border-light)';
+            
+            html += `
+              <div style="background: ${bgColor}; border: 1px solid ${borderColor}; border-radius: 12px; padding: 15px; ${isSelected ? 'box-shadow: 0 0 15px rgba(102, 126, 234, 0.2);' : ''}">
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 15px;">
+                  <div style="flex: 1;">
+                    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 5px;">
+                      ${isSelected ? '<span style="background: var(--primary); color: white; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 600;">SELECTED</span>' : ''}
+                      <span style="font-weight: 600; color: var(--text-primary);">${escapeHtml(book.title)}</span>
+                    </div>
+                    <div style="font-size: 13px; color: var(--text-muted);">by ${escapeHtml(book.author || 'Unknown')}</div>
+                    ${book.releaseDate ? `<div style="font-size: 12px; color: var(--text-muted);">Released: ${book.releaseDate.split('T')[0]}</div>` : ''}
+                    ${book.overview ? `<div style="font-size: 12px; color: var(--text-muted); margin-top: 8px; line-height: 1.4;">${escapeHtml(book.overview)}</div>` : ''}
+                    <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">GoodReads ID: ${book.foreignBookId}</div>
+                  </div>
+                  <div style="text-align: right; min-width: 100px;">
+                    <div style="font-size: 24px; font-weight: 700; color: ${book.score >= 50 ? '#22c55e' : book.score > 0 ? '#f59e0b' : '#ef4444'};">${book.score}</div>
+                    <div style="font-size: 10px; color: var(--text-muted);">score</div>
+                    <div style="font-size: 10px; color: var(--text-muted); margin-top: 5px; text-align: left;">
+                      ${book.scoreBreakdown.map(s => `<div>${escapeHtml(s)}</div>`).join('')}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            `;
+          });
+          
+          html += `</div>`;
+        }
+        
+        // Add copy button
+        html += `
+          <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--border-light); display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 12px; color: var(--text-muted);">💡 Full results logged to browser console (F12)</span>
+            <button class="btn btn-secondary" onclick="copyReadarrResults()" style="font-size: 12px; padding: 8px 16px;">📋 Copy JSON</button>
+          </div>
+        `;
+        
+        resultsDiv.innerHTML = html;
+        
+        // Store for copying
+        window.lastReadarrTestResult = result;
+        
       } catch (error) {
-        showToast('Failed to test Readarr: ' + error.message, 'error');
+        resultsDiv.innerHTML = `
+          <div style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 12px; padding: 20px; text-align: center;">
+            <span style="font-size: 32px;">❌</span>
+            <p style="color: #fca5a5; margin-top: 10px;">Error: ${error.message}</p>
+          </div>
+        `;
+      }
+    }
+    
+    function copyReadarrResults() {
+      if (window.lastReadarrTestResult) {
+        navigator.clipboard.writeText(JSON.stringify(window.lastReadarrTestResult, null, 2))
+          .then(() => showToast('Results copied to clipboard!', 'success'))
+          .catch(() => showToast('Failed to copy', 'error'));
       }
     }
 
@@ -1310,12 +1442,19 @@
 
     // Close modal on escape
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') closeModal();
+      if (e.key === 'Escape') {
+        closeModal();
+        closeReadarrTestModal();
+      }
     });
 
     // Close modal on backdrop click
     document.getElementById('detailModal').addEventListener('click', (e) => {
       if (e.target.classList.contains('modal')) closeModal();
+    });
+    
+    document.getElementById('readarrTestModal').addEventListener('click', (e) => {
+      if (e.target.classList.contains('modal')) closeReadarrTestModal();
     });
 
     // ============================================
@@ -1333,6 +1472,13 @@
     document.getElementById('modalCloseBtn').addEventListener('click', closeModal);
     document.getElementById('refreshQueueBtn')?.addEventListener('click', loadReadarrQueue);
     document.getElementById('testReadarrBtn')?.addEventListener('click', testReadarr);
+    document.getElementById('readarrTestCloseBtn')?.addEventListener('click', closeReadarrTestModal);
+    document.getElementById('runReadarrTestBtn')?.addEventListener('click', runReadarrTest);
+    
+    // Enter key in test modal
+    document.getElementById('testIsbn')?.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') runReadarrTest();
+    });
     
     // Quick filter by clicking on pending stat
     document.getElementById('pendingCard')?.addEventListener('click', () => {

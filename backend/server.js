@@ -453,7 +453,62 @@ async function searchReadarr(bookTitle, author, isbn) {
       topResults
     });
     
-    return books.length > 0 ? books[0] : null;
+    if (books.length === 0) return null;
+    
+    // Try to find the best match instead of just returning first result
+    const normalizedSearchTitle = bookTitle.toLowerCase().trim();
+    const normalizedSearchAuthor = author.toLowerCase().trim();
+    
+    // Score each result for relevance
+    const scored = books.map(book => {
+      const bookTitleLower = (book.title || '').toLowerCase();
+      const bookAuthorLower = (book.authorName || '').toLowerCase();
+      let score = 0;
+      
+      // Exact title match (highest priority)
+      if (bookTitleLower === normalizedSearchTitle) {
+        score += 100;
+      }
+      // Title starts with search title
+      else if (bookTitleLower.startsWith(normalizedSearchTitle)) {
+        score += 50;
+      }
+      // Search title is contained in book title
+      else if (bookTitleLower.includes(normalizedSearchTitle)) {
+        score += 25;
+      }
+      
+      // Penalize titles that look like companion books/guides
+      if (bookTitleLower.includes('trivia') || 
+          bookTitleLower.includes('reading list') || 
+          bookTitleLower.includes('study guide') ||
+          bookTitleLower.includes('for fans') ||
+          bookTitleLower.includes('summary') ||
+          bookTitleLower.includes('analysis')) {
+        score -= 50;
+      }
+      
+      // Author match
+      if (bookAuthorLower.includes(normalizedSearchAuthor) || 
+          normalizedSearchAuthor.includes(bookAuthorLower)) {
+        score += 20;
+      }
+      
+      return { book, score };
+    });
+    
+    // Sort by score descending and return best match
+    scored.sort((a, b) => b.score - a.score);
+    
+    const bestMatch = scored[0];
+    logger.info('Readarr best match selected', { 
+      searchTitle: bookTitle,
+      selectedTitle: bestMatch.book.title,
+      score: bestMatch.score,
+      wasFirst: bestMatch.book === books[0]
+    });
+    
+    return bestMatch.book;
   } catch (error) {
     logger.error('Readarr search error', { bookTitle, author, isbn, error: error.message });
     return null;
@@ -1165,7 +1220,7 @@ app.get('/api/admin/readarr/search', authenticateToken, async (req, res) => {
   res.json({ results: result ? [result] : [] });
 });
 
-// Test Readarr integration - search without adding
+// Test Readarr integration - search without adding (returns all results with scores)
 app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
   const { title, author, isbn } = req.body;
   
@@ -1198,44 +1253,101 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
 
     const readarrStatus = await testResponse.json();
 
-    // Search for the book - use ISBN if provided, otherwise author+title
-    const searchQuery = isbn ? isbn : `${author} ${title}`;
-    logger.info('Test Readarr search', { title, author, isbn: isbn || '(none)', searchQuery });
+    // Search for the book - do raw search to get all results
+    const rawQuery = isbn ? isbn : `${author} ${title}`;
+    const searchQuery = encodeURIComponent(rawQuery);
     
-    const result = await searchReadarr(title, author, isbn || '');
+    logger.info('Test Readarr search', { title, author, isbn: isbn || '(none)', searchQuery: rawQuery });
     
-    if (result) {
-      logger.info('Test Readarr found book', { 
-        searchedFor: { title, author, isbn: isbn || '(none)' },
-        found: { title: result.title, author: result.authorName }
-      });
-      
-      res.json({
-        success: true,
-        message: 'Readarr is working! Book found.',
+    const searchResponse = await fetch(`${process.env.READARR_URL}/api/v1/book/lookup?term=${searchQuery}`, {
+      headers: { 'X-Api-Key': process.env.READARR_API_KEY }
+    });
+    
+    if (!searchResponse.ok) {
+      return res.json({
+        success: false,
+        message: `Readarr search failed: ${searchResponse.status}`,
         configured: true,
-        readarrVersion: readarrStatus.version,
-        searchUsed: searchQuery,
-        bookFound: {
-          title: result.title,
-          authorName: result.authorName,
-          foreignBookId: result.foreignBookId,
-          releaseDate: result.releaseDate,
-          overview: result.overview?.substring(0, 200) + (result.overview?.length > 200 ? '...' : '')
-        }
-      });
-    } else {
-      logger.info('Test Readarr no results', { title, author, isbn: isbn || '(none)', searchQuery });
-      
-      res.json({
-        success: true,
-        message: 'Readarr is working, but no book found with those search terms.',
-        configured: true,
-        readarrVersion: readarrStatus.version,
-        bookFound: null,
-        searchTerms: { title, author, isbn: isbn || '(none)', queryUsed: searchQuery }
+        readarrVersion: readarrStatus.version
       });
     }
+    
+    const books = await searchResponse.json();
+    
+    // Score all results
+    const normalizedSearchTitle = title.toLowerCase().trim();
+    const normalizedSearchAuthor = author.toLowerCase().trim();
+    
+    const scoredResults = books.slice(0, 10).map(book => {
+      const bookTitleLower = (book.title || '').toLowerCase();
+      const bookAuthorLower = (book.authorName || '').toLowerCase();
+      let score = 0;
+      const scoreBreakdown = [];
+      
+      // Exact title match
+      if (bookTitleLower === normalizedSearchTitle) {
+        score += 100;
+        scoreBreakdown.push('+100 exact title');
+      } else if (bookTitleLower.startsWith(normalizedSearchTitle)) {
+        score += 50;
+        scoreBreakdown.push('+50 title starts with');
+      } else if (bookTitleLower.includes(normalizedSearchTitle)) {
+        score += 25;
+        scoreBreakdown.push('+25 title contains');
+      }
+      
+      // Penalize companion books
+      if (bookTitleLower.includes('trivia') || 
+          bookTitleLower.includes('reading list') || 
+          bookTitleLower.includes('study guide') ||
+          bookTitleLower.includes('for fans') ||
+          bookTitleLower.includes('summary') ||
+          bookTitleLower.includes('analysis')) {
+        score -= 50;
+        scoreBreakdown.push('-50 companion book');
+      }
+      
+      // Author match
+      if (bookAuthorLower.includes(normalizedSearchAuthor) || 
+          normalizedSearchAuthor.includes(bookAuthorLower)) {
+        score += 20;
+        scoreBreakdown.push('+20 author match');
+      }
+      
+      return {
+        title: book.title,
+        author: book.authorName,
+        foreignBookId: book.foreignBookId,
+        releaseDate: book.releaseDate,
+        overview: book.overview?.substring(0, 150) + (book.overview?.length > 150 ? '...' : ''),
+        score,
+        scoreBreakdown,
+        isSelected: false
+      };
+    });
+    
+    // Sort by score and mark selected
+    scoredResults.sort((a, b) => b.score - a.score);
+    if (scoredResults.length > 0) {
+      scoredResults[0].isSelected = true;
+    }
+    
+    logger.info('Test Readarr results', { 
+      searchQuery: rawQuery, 
+      totalFound: books.length,
+      topScore: scoredResults[0]?.score,
+      selectedTitle: scoredResults[0]?.title
+    });
+    
+    res.json({
+      success: true,
+      configured: true,
+      readarrVersion: readarrStatus.version,
+      searchQuery: rawQuery,
+      searchTerms: { title, author, isbn: isbn || '' },
+      totalResults: books.length,
+      results: scoredResults
+    });
   } catch (error) {
     logger.error('Readarr test error', { error: error.message });
     res.json({ 

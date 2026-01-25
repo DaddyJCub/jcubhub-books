@@ -330,7 +330,7 @@
             formGroups.forEach(el => el.style.display = '');
           }, 5000);
         } else {
-          alert(result.error || 'Failed to submit request. Please try again.');
+          showFormError(result.error || result.errors?.[0]?.msg || 'Failed to submit request. Please try again.');
           submitBtn.disabled = false;
           submitBtn.textContent = 'Submit Request';
           // Reset Turnstile on error
@@ -341,7 +341,7 @@
         }
       } catch (error) {
         console.error('Error submitting request:', error);
-        alert('Failed to submit request. Please check your connection and try again.');
+        showFormError('Failed to submit request. Please check your connection and try again.');
         submitBtn.disabled = false;
         submitBtn.textContent = 'Submit Request';
         // Reset Turnstile on error
@@ -350,6 +350,35 @@
         }
         turnstileToken = null;
       }
+    }
+    
+    // Show styled error message in form
+    function showFormError(message) {
+      // Remove any existing error
+      const existingError = document.querySelector('.form-error-message');
+      if (existingError) existingError.remove();
+      
+      const errorDiv = document.createElement('div');
+      errorDiv.className = 'form-error-message';
+      errorDiv.innerHTML = `
+        <div style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 12px; padding: 16px; margin-bottom: 20px; display: flex; align-items: center; gap: 12px;">
+          <span style="font-size: 20px;">⚠️</span>
+          <span style="color: #fca5a5; font-size: 14px;">${message}</span>
+        </div>
+      `;
+      
+      const form = document.getElementById('requestForm');
+      const submitBtn = document.getElementById('submitBtn');
+      form.insertBefore(errorDiv, submitBtn.parentElement);
+      
+      // Auto-remove after 8 seconds
+      setTimeout(() => {
+        if (errorDiv.parentElement) {
+          errorDiv.style.transition = 'opacity 0.3s';
+          errorDiv.style.opacity = '0';
+          setTimeout(() => errorDiv.remove(), 300);
+        }
+      }, 8000);
     }
 
     // Close overlays on Escape key
