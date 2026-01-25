@@ -423,9 +423,10 @@ async function searchReadarr(bookTitle, author, isbn) {
 
   try {
     // Use ISBN if available for more accurate search
-    const searchQuery = isbn 
-      ? encodeURIComponent(isbn)
-      : encodeURIComponent(`${author} ${bookTitle}`);
+    const rawQuery = isbn ? isbn : `${author} ${bookTitle}`;
+    const searchQuery = encodeURIComponent(rawQuery);
+    
+    logger.info('Readarr search', { searchQuery: rawQuery, usingIsbn: !!isbn });
     
     const response = await fetch(`${process.env.READARR_URL}/api/v1/book/lookup?term=${searchQuery}`, {
       headers: {
@@ -433,10 +434,25 @@ async function searchReadarr(bookTitle, author, isbn) {
       }
     });
 
-    if (!response.ok) return null;
+    if (!response.ok) {
+      logger.warn('Readarr search failed', { status: response.status });
+      return null;
+    }
 
     const books = await response.json();
-    logger.debug('Readarr search result', { bookTitle, author, isbn, found: books.length });
+    
+    // Log top 3 results for debugging
+    const topResults = books.slice(0, 3).map(b => ({
+      title: b.title,
+      author: b.authorName,
+      foreignBookId: b.foreignBookId
+    }));
+    logger.info('Readarr search results', { 
+      searchQuery: rawQuery, 
+      totalFound: books.length,
+      topResults
+    });
+    
     return books.length > 0 ? books[0] : null;
   } catch (error) {
     logger.error('Readarr search error', { bookTitle, author, isbn, error: error.message });
@@ -541,7 +557,7 @@ app.post('/api/book-request',
     body('requesterEmail').isEmail().normalizeEmail().withMessage('Valid email is required'),
     body('bookTitle').trim().notEmpty().withMessage('Book title is required'),
     body('author').trim().notEmpty().withMessage('Author is required'),
-    body('isbn').optional().trim().matches(/^[\dXx]{10,13}$/).withMessage('Invalid ISBN format'),
+    body('isbn').optional({ values: 'falsy' }).trim().matches(/^[\dXx-]{10,17}$/).withMessage('Invalid ISBN format'),
     body('format').isIn(['epub', 'pdf', 'mobi', 'any']).withMessage('Invalid format'),
     body('notes').optional().trim(),
     body('notifyOnComplete').optional().isBoolean(),
@@ -1182,30 +1198,42 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
 
     const readarrStatus = await testResponse.json();
 
-    // Search for the book
+    // Search for the book - use ISBN if provided, otherwise author+title
+    const searchQuery = isbn ? isbn : `${author} ${title}`;
+    logger.info('Test Readarr search', { title, author, isbn: isbn || '(none)', searchQuery });
+    
     const result = await searchReadarr(title, author, isbn || '');
     
     if (result) {
+      logger.info('Test Readarr found book', { 
+        searchedFor: { title, author, isbn: isbn || '(none)' },
+        found: { title: result.title, author: result.authorName }
+      });
+      
       res.json({
         success: true,
         message: 'Readarr is working! Book found.',
         configured: true,
         readarrVersion: readarrStatus.version,
+        searchUsed: searchQuery,
         bookFound: {
           title: result.title,
           authorName: result.authorName,
           foreignBookId: result.foreignBookId,
+          releaseDate: result.releaseDate,
           overview: result.overview?.substring(0, 200) + (result.overview?.length > 200 ? '...' : '')
         }
       });
     } else {
+      logger.info('Test Readarr no results', { title, author, isbn: isbn || '(none)', searchQuery });
+      
       res.json({
         success: true,
         message: 'Readarr is working, but no book found with those search terms.',
         configured: true,
         readarrVersion: readarrStatus.version,
         bookFound: null,
-        searchTerms: { title, author, isbn: isbn || '(none)' }
+        searchTerms: { title, author, isbn: isbn || '(none)', queryUsed: searchQuery }
       });
     }
   } catch (error) {

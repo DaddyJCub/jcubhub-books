@@ -824,13 +824,24 @@
         });
         const result = await response.json();
         
+        // Always log full result to console for debugging
+        console.log('Readarr Test Result:', result);
+        console.log('Search used:', result.searchUsed || result.searchTerms?.queryUsed);
+        if (result.bookFound) {
+          console.log('Book found:', result.bookFound);
+        }
+        
         if (!result.configured) {
           showToast('⚠️ ' + result.message, 'error');
         } else if (result.success) {
           if (result.bookFound) {
-            showToast(`✅ Readarr v${result.readarrVersion} - Found: "${result.bookFound.title}" by ${result.bookFound.authorName}`, 'success');
+            const matchWarning = result.bookFound.title.toLowerCase() !== title.toLowerCase() 
+              ? ' ⚠️ Title differs from search!' 
+              : '';
+            showToast(`✅ Found: "${result.bookFound.title}" by ${result.bookFound.authorName}${matchWarning} (Query: ${result.searchUsed})`, 'success');
+            alert(`Readarr Test Results\n\nSearched for: "${title}" by ${author}${isbn ? ` (ISBN: ${isbn})` : ''}\nQuery used: ${result.searchUsed}\n\nFound:\n• Title: ${result.bookFound.title}\n• Author: ${result.bookFound.authorName}\n• GoodReads ID: ${result.bookFound.foreignBookId}\n• Release: ${result.bookFound.releaseDate || 'Unknown'}\n\n${result.bookFound.overview || ''}\n\nCheck browser console (F12) for full details.`);
           } else {
-            showToast(`✅ Readarr v${result.readarrVersion} is working! No exact match found for "${title}"`, 'success');
+            showToast(`✅ Readarr v${result.readarrVersion} working, but no results for: ${result.searchTerms?.queryUsed}`, 'success');
           }
         } else {
           showToast('❌ ' + result.message, 'error');
