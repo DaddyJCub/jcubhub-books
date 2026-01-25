@@ -477,7 +477,9 @@
       <h1 class="admin-title">JcubHub Books Admin</h1>
       <div class="admin-actions">
         <span class="admin-user" id="adminUsername"></span>
-        <button class="btn btn-secondary" id="syncCwaBtn">Sync CWA</button>
+        <button class="btn btn-primary" id="processAllBtn" title="Add all pending to Readarr">⚡ Process All</button>
+        <button class="btn btn-secondary" id="completeAllBtn" title="Mark all in-progress as complete">✓ Complete All</button>
+        <button class="btn btn-secondary" id="syncCwaBtn">🔄 Sync CWA</button>
         <a href="/" class="btn btn-secondary">View Site</a>
         <button class="btn btn-secondary" id="logoutBtn">Logout</button>
       </div>
@@ -489,19 +491,34 @@
         <div class="stat-number" id="statTotal">-</div>
         <div class="stat-label">Total Requests</div>
       </div>
-      <div class="stat-card">
+      <div class="stat-card" style="cursor: pointer;" id="pendingCard">
         <div class="stat-number" id="statPending">-</div>
-        <div class="stat-label">Pending</div>
+        <div class="stat-label">⏳ Pending</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number" id="statSearching">-</div>
+        <div class="stat-label">🔍 Searching</div>
       </div>
       <div class="stat-card">
         <div class="stat-number" id="statCompleted">-</div>
-        <div class="stat-label">Completed</div>
+        <div class="stat-label">✅ Completed</div>
       </div>
       <div class="stat-card">
         <div class="stat-number" id="statRejected">-</div>
-        <div class="stat-label">Rejected</div>
+        <div class="stat-label">❌ Rejected</div>
       </div>
     </div>
+
+    <!-- Readarr Queue Panel -->
+    <section class="requests-section" id="readarrPanel" style="margin-bottom: 20px; display: none;">
+      <div class="section-header">
+        <h2 class="section-title">📥 Readarr Download Queue</h2>
+        <button class="btn btn-secondary" id="refreshQueueBtn">Refresh</button>
+      </div>
+      <div id="readarrQueueContent">
+        <div class="loading"><div class="spinner"></div></div>
+      </div>
+    </section>
 
     <!-- Requests Section -->
     <section class="requests-section">
@@ -689,10 +706,120 @@
         
         document.getElementById('statTotal').textContent = stats.total;
         document.getElementById('statPending').textContent = stats.pending;
+        document.getElementById('statSearching').textContent = stats.searching || 0;
         document.getElementById('statCompleted').textContent = stats.completed;
         document.getElementById('statRejected').textContent = stats.rejected;
+
+        // Show automation status
+        if (stats.automation?.autoAddToReadarr) {
+          showToast('🤖 Auto-add to Readarr is enabled', '');
+        }
+
+        // Load Readarr queue if configured
+        loadReadarrQueue();
       } catch (error) {
         console.error('Failed to load stats:', error);
+      }
+    }
+
+    async function loadReadarrQueue() {
+      const panel = document.getElementById('readarrPanel');
+      const content = document.getElementById('readarrQueueContent');
+      
+      try {
+        const response = await apiCall('/api/admin/readarr/queue');
+        if (!response.ok) {
+          panel.style.display = 'none';
+          return;
+        }
+        
+        const data = await response.json();
+        panel.style.display = 'block';
+        
+        if (data.queueCount === 0 && data.recentDownloads.length === 0) {
+          content.innerHTML = '<p style="color: var(--text-muted); padding: 20px; text-align: center;">No active downloads or recent completions</p>';
+          return;
+        }
+
+        let html = '';
+        
+        if (data.queue.length > 0) {
+          html += '<div style="margin-bottom: 15px;"><strong>Currently Downloading:</strong></div>';
+          html += '<div style="display: flex; flex-wrap: wrap; gap: 10px;">';
+          for (const item of data.queue) {
+            const progress = item.sizeleft && item.size ? Math.round((1 - item.sizeleft / item.size) * 100) : 0;
+            html += `
+              <div style="background: rgba(102, 126, 234, 0.1); padding: 12px 16px; border-radius: 8px; flex: 1; min-width: 250px;">
+                <div style="font-weight: 600; margin-bottom: 5px;">${escapeHtml(item.title || 'Unknown')}</div>
+                <div style="height: 6px; background: var(--border-light); border-radius: 3px; overflow: hidden;">
+                  <div style="height: 100%; width: ${progress}%; background: var(--gradient-primary);"></div>
+                </div>
+                <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 5px;">${progress}% - ${item.status || 'downloading'}</div>
+              </div>
+            `;
+          }
+          html += '</div>';
+        }
+        
+        if (data.recentDownloads.length > 0) {
+          html += '<div style="margin: 20px 0 15px;"><strong>Recently Completed:</strong></div>';
+          html += '<div style="display: flex; flex-wrap: wrap; gap: 8px;">';
+          for (const item of data.recentDownloads.slice(0, 5)) {
+            html += `<span style="background: rgba(34, 197, 94, 0.2); color: #22c55e; padding: 6px 12px; border-radius: 20px; font-size: 0.85rem;">✓ ${escapeHtml(item.sourceTitle || item.bookTitle || 'Book')}</span>`;
+          }
+          html += '</div>';
+        }
+        
+        content.innerHTML = html;
+      } catch (error) {
+        panel.style.display = 'none';
+        console.error('Failed to load Readarr queue:', error);
+      }
+    }
+
+    // Batch operations
+    async function processAllPending() {
+      if (!confirm('This will add ALL pending requests to Readarr. Continue?')) return;
+      
+      showToast('Processing all pending requests...', '');
+      
+      try {
+        const response = await apiCall('/api/admin/batch/process-pending', { method: 'POST' });
+        const result = await response.json();
+        
+        if (result.success) {
+          showToast(`✅ ${result.message}`, 'success');
+          if (result.errors?.length > 0) {
+            console.log('Batch processing errors:', result.errors);
+          }
+          loadRequests();
+          loadStats();
+        } else {
+          showToast(result.error || 'Batch processing failed', 'error');
+        }
+      } catch (error) {
+        showToast('Failed to process pending requests', 'error');
+      }
+    }
+
+    async function completeAllInProgress() {
+      if (!confirm('This will mark ALL searching/downloading requests as completed and notify users. Continue?')) return;
+      
+      showToast('Completing all in-progress requests...', '');
+      
+      try {
+        const response = await apiCall('/api/admin/batch/complete-all', { method: 'POST' });
+        const result = await response.json();
+        
+        if (result.success) {
+          showToast(`✅ Completed ${result.completed} requests`, 'success');
+          loadRequests();
+          loadStats();
+        } else {
+          showToast(result.error || 'Batch complete failed', 'error');
+        }
+      } catch (error) {
+        showToast('Failed to complete requests', 'error');
       }
     }
 
@@ -1101,9 +1228,20 @@
     document.getElementById('loginForm').addEventListener('submit', handleLogin);
 
     // Header buttons
+    document.getElementById('processAllBtn').addEventListener('click', processAllPending);
+    document.getElementById('completeAllBtn').addEventListener('click', completeAllInProgress);
     document.getElementById('syncCwaBtn').addEventListener('click', syncCwa);
     document.getElementById('logoutBtn').addEventListener('click', logout);
     document.getElementById('modalCloseBtn').addEventListener('click', closeModal);
+    document.getElementById('refreshQueueBtn')?.addEventListener('click', loadReadarrQueue);
+    
+    // Quick filter by clicking on pending stat
+    document.getElementById('pendingCard')?.addEventListener('click', () => {
+      document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
+      document.querySelector('[data-filter="pending"]').classList.add('active');
+      currentFilter = 'pending';
+      loadRequests();
+    });
 
     // Event delegation for dynamic buttons
     document.addEventListener('click', (e) => {

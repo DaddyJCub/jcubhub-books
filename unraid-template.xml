@@ -111,6 +111,16 @@
       <Name>WEBHOOK_SECRET</Name>
       <Mode/>
     </Variable>
+    <Variable>
+      <Value>false</Value>
+      <Name>AUTO_ADD_READARR</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>0</Value>
+      <Name>AUTO_SYNC_INTERVAL</Name>
+      <Mode/>
+    </Variable>
   </Environment>
   <Config Name="Web UI Port" Target="3003" Default="3003" Mode="tcp" Description="Web interface port" Type="Port" Display="always" Required="true" Mask="false">3003</Config>
   <Config Name="Data" Target="/app/data" Default="/mnt/user/appdata/jcubhub-books" Mode="rw" Description="Database storage location" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/jcubhub-books</Config>
@@ -127,4 +137,6 @@
   <Config Name="CWA Username" Target="CWA_USERNAME" Default="" Mode="" Description="CWA username for OPDS access" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
   <Config Name="CWA Password" Target="CWA_PASSWORD" Default="" Mode="" Description="CWA password for OPDS access" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
   <Config Name="Webhook Secret" Target="WEBHOOK_SECRET" Default="" Mode="" Description="Secret for webhook verification (optional)" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+  <Config Name="Auto-Add to Readarr" Target="AUTO_ADD_READARR" Default="false" Mode="" Description="Automatically add new requests to Readarr (true/false)" Type="Variable" Display="always" Required="false" Mask="false">false</Config>
+  <Config Name="Auto-Sync Interval" Target="AUTO_SYNC_INTERVAL" Default="0" Mode="" Description="Minutes between automatic CWA sync checks (0 = disabled, e.g., 60 for hourly)" Type="Variable" Display="always" Required="false" Mask="false">0</Config>
 </Container>

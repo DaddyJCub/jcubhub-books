@@ -63,7 +63,16 @@ const integrations = {
   cwa: !!(process.env.CWA_URL && process.env.CWA_USERNAME && process.env.CWA_PASSWORD),
   adminConfigured: !!(process.env.ADMIN_USERNAME && process.env.ADMIN_PASSWORD)
 };
+
+// Automation settings (can be overridden by env vars)
+const automation = {
+  autoAddToReadarr: process.env.AUTO_ADD_READARR === 'true',  // Auto-add new requests to Readarr
+  autoSyncInterval: parseInt(process.env.AUTO_SYNC_INTERVAL) || 0,  // Minutes between CWA syncs (0 = disabled)
+  autoApprove: process.env.AUTO_APPROVE === 'true'  // Auto-approve all requests
+};
+
 logger.info('Integrations Status:', integrations);
+logger.info('Automation Settings:', automation);
 
 // Initialize SQLite database
 // Use DATA_PATH env var if set (for Docker volume mounts), otherwise fallback to local data folder
@@ -636,6 +645,27 @@ app.post('/api/book-request',
       cwaAvailable,
       notifyOnComplete: notifyOnComplete !== false
     });
+
+    // Auto-add to Readarr if enabled and book not already in CWA
+    if (automation.autoAddToReadarr && !cwaAvailable && integrations.readarr) {
+      try {
+        logger.info('Auto-adding to Readarr...', { requestId: id, bookTitle });
+        const readarrResult = await addBookToReadarr({ bookTitle, author });
+        
+        if (readarrResult.success) {
+          const updateNow = new Date().toISOString();
+          db.prepare("UPDATE requests SET status = 'searching', updated_at = ? WHERE id = ?").run(updateNow, id);
+          db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
+            id, 'searching', updateNow, 'Automatically added to Readarr'
+          );
+          logger.info('Auto-added to Readarr successfully', { requestId: id });
+        } else {
+          logger.warn('Auto-add to Readarr failed', { requestId: id, error: readarrResult.error });
+        }
+      } catch (error) {
+        logger.error('Auto-add to Readarr error', { requestId: id, error: error.message });
+      }
+    }
   }
 );
 
@@ -839,17 +869,156 @@ app.get('/api/admin/stats', authenticateToken, (req, res) => {
   const stats = {
     total: db.prepare('SELECT COUNT(*) as count FROM requests').get().count,
     pending: db.prepare("SELECT COUNT(*) as count FROM requests WHERE status = 'pending'").get().count,
+    searching: db.prepare("SELECT COUNT(*) as count FROM requests WHERE status = 'searching'").get().count,
     completed: db.prepare("SELECT COUNT(*) as count FROM requests WHERE status = 'completed'").get().count,
     rejected: db.prepare("SELECT COUNT(*) as count FROM requests WHERE status IN ('rejected', 'unavailable')").get().count,
-    recentRequests: db.prepare('SELECT * FROM requests ORDER BY created_at DESC LIMIT 5').all()
+    recentRequests: db.prepare('SELECT * FROM requests ORDER BY created_at DESC LIMIT 5').all(),
+    automation: automation
   };
 
   res.json(stats);
 });
 
 // ============================================
+// Batch Operations
+// ============================================
+
+// Process all pending requests (add to Readarr)
+app.post('/api/admin/batch/process-pending', authenticateToken, async (req, res) => {
+  const pendingRequests = db.prepare("SELECT * FROM requests WHERE status = 'pending'").all();
+  
+  if (pendingRequests.length === 0) {
+    return res.json({ success: true, processed: 0, message: 'No pending requests' });
+  }
+
+  const results = {
+    processed: 0,
+    succeeded: 0,
+    failed: 0,
+    errors: []
+  };
+
+  for (const request of pendingRequests) {
+    results.processed++;
+    
+    try {
+      const readarrResult = await addBookToReadarr({
+        bookTitle: request.book_title,
+        author: request.author
+      });
+
+      const now = new Date().toISOString();
+      
+      if (readarrResult.success) {
+        db.prepare("UPDATE requests SET status = 'searching', updated_at = ? WHERE id = ?").run(now, request.id);
+        db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
+          request.id, 'searching', now, 'Batch processed - Added to Readarr'
+        );
+        results.succeeded++;
+      } else {
+        // Mark as approved but note the error
+        db.prepare("UPDATE requests SET status = 'approved', updated_at = ? WHERE id = ?").run(now, request.id);
+        db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
+          request.id, 'approved', now, `Approved but Readarr add failed: ${readarrResult.error}`
+        );
+        results.failed++;
+        results.errors.push({ id: request.id, book: request.book_title, error: readarrResult.error });
+      }
+    } catch (error) {
+      results.failed++;
+      results.errors.push({ id: request.id, book: request.book_title, error: error.message });
+    }
+  }
+
+  logger.info('Batch process completed', { 
+    admin: req.user.username, 
+    ...results 
+  });
+
+  res.json({ 
+    success: true, 
+    ...results,
+    message: `Processed ${results.processed} requests: ${results.succeeded} added to Readarr, ${results.failed} failed`
+  });
+});
+
+// Mark all searching/downloading as completed (for manual batch completion)
+app.post('/api/admin/batch/complete-all', authenticateToken, async (req, res) => {
+  const inProgress = db.prepare("SELECT * FROM requests WHERE status IN ('searching', 'downloading')").all();
+  
+  if (inProgress.length === 0) {
+    return res.json({ success: true, completed: 0, message: 'No in-progress requests' });
+  }
+
+  const now = new Date().toISOString();
+  let completedCount = 0;
+
+  for (const request of inProgress) {
+    db.prepare("UPDATE requests SET status = 'completed', cwa_available = 1, updated_at = ? WHERE id = ?").run(now, request.id);
+    db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
+      request.id, 'completed', now, 'Batch completed by admin'
+    );
+
+    // Send notification if opted in
+    if (request.notify_on_complete) {
+      const cwaLink = process.env.CWA_URL || 'https://cwa.jcubhub.com';
+      const emailContent = `
+        <div style="text-align: center; margin-bottom: 30px;">
+          <span style="font-size: 48px;">🎉</span>
+        </div>
+        <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Great News! Your Book is Ready</h2>
+        <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+        <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
+          Your requested book "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} is now available!
+        </p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
+        </div>
+      `;
+      await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrapEmailHtml(emailContent, 'Your Book is Ready'));
+    }
+    
+    completedCount++;
+  }
+
+  logger.info('Batch complete all', { admin: req.user.username, completedCount });
+  res.json({ success: true, completed: completedCount });
+});
+
+// ============================================
 // Readarr Integration Routes
 // ============================================
+
+// Get Readarr queue/status
+app.get('/api/admin/readarr/queue', authenticateToken, async (req, res) => {
+  if (!process.env.READARR_URL || !process.env.READARR_API_KEY) {
+    return res.status(400).json({ error: 'Readarr not configured' });
+  }
+
+  try {
+    // Get download queue
+    const queueResponse = await fetch(`${process.env.READARR_URL}/api/v1/queue?includeBook=true`, {
+      headers: { 'X-Api-Key': process.env.READARR_API_KEY }
+    });
+    
+    // Get recent history (last 20 completed)
+    const historyResponse = await fetch(`${process.env.READARR_URL}/api/v1/history?pageSize=20&sortKey=date&sortDirection=descending`, {
+      headers: { 'X-Api-Key': process.env.READARR_API_KEY }
+    });
+
+    const queue = queueResponse.ok ? await queueResponse.json() : { records: [] };
+    const history = historyResponse.ok ? await historyResponse.json() : { records: [] };
+
+    res.json({
+      queue: queue.records || [],
+      queueCount: queue.totalRecords || 0,
+      recentDownloads: (history.records || []).filter(h => h.eventType === 'downloadFolderImported').slice(0, 10)
+    });
+  } catch (error) {
+    logger.error('Readarr queue fetch error', { error: error.message });
+    res.status(500).json({ error: 'Failed to fetch Readarr queue' });
+  }
+});
 
 // Search book in Readarr
 app.get('/api/admin/readarr/search', authenticateToken, async (req, res) => {
@@ -1056,6 +1225,53 @@ app.listen(PORT, () => {
   logger.info(`Static files: ${path.join(__dirname, 'public')}`);
   logger.info(`Health check: http://localhost:${PORT}/api/health`);
   logger.info(`Admin panel: http://localhost:${PORT}/admin`);
+
+  // Start auto-sync if configured
+  if (automation.autoSyncInterval > 0 && integrations.cwa) {
+    logger.info(`Auto-sync enabled: checking CWA every ${automation.autoSyncInterval} minutes`);
+    setInterval(async () => {
+      logger.info('Running scheduled CWA sync...');
+      try {
+        const requests = db.prepare("SELECT * FROM requests WHERE status != 'completed' AND status != 'rejected' AND status != 'unavailable'").all();
+        let updatedCount = 0;
+        const now = new Date().toISOString();
+
+        for (const request of requests) {
+          const available = await checkCwaAvailability(request.book_title, request.author);
+          
+          if (available && !request.cwa_available) {
+            db.prepare("UPDATE requests SET cwa_available = 1, status = 'completed', updated_at = ? WHERE id = ?").run(now, request.id);
+            db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
+              request.id, 'completed', now, 'Auto-completed: Book found in CWA during scheduled sync'
+            );
+
+            if (request.notify_on_complete) {
+              const cwaLink = process.env.CWA_URL || 'https://cwa.jcubhub.com';
+              const emailContent = `
+                <div style="text-align: center; margin-bottom: 30px;"><span style="font-size: 48px;">🎉</span></div>
+                <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Your Book is Ready!</h2>
+                <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+                <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
+                  "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} is now available!
+                </p>
+                <div style="text-align: center; margin: 30px 0;">
+                  <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
+                </div>
+              `;
+              await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrapEmailHtml(emailContent, 'Your Book is Ready'));
+            }
+            updatedCount++;
+          }
+        }
+        
+        if (updatedCount > 0) {
+          logger.info('Scheduled sync completed', { checked: requests.length, updated: updatedCount });
+        }
+      } catch (error) {
+        logger.error('Scheduled sync error', { error: error.message });
+      }
+    }, automation.autoSyncInterval * 60 * 1000);
+  }
 });
 
 // Graceful shutdown
