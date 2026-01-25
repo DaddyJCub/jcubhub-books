@@ -1,0 +1,39 @@
+# JcubHub Books - Unraid Docker Compose
+# Save this file and run: docker-compose -f docker-compose.unraid.yml up -d
+
+version: '3.8'
+
+services:
+  jcubhub-books:
+    image: ghcr.io/daddyjcub/jcubhub-books:latest
+    container_name: jcubhub-books
+    ports:
+      - "3003:3003"
+    volumes:
+      # Persist SQLite database - adjust path for your Unraid setup
+      - /mnt/user/appdata/jcubhub-books/data:/app/data
+    environment:
+      - PORT=3003
+      # Admin credentials
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=changeme
+      - JWT_SECRET=change-this-to-a-random-string
+      - ADMIN_EMAIL=your-email@example.com
+      # Email (optional - for notifications)
+      - ZOHO_EMAIL=
+      - ZOHO_PASSWORD=
+      # Turnstile CAPTCHA (optional)
+      - TURNSTILE_SECRET_KEY=
+      # Readarr Integration (optional)
+      - READARR_URL=http://readarr:8787
+      - READARR_API_KEY=
+      # CWA Integration (optional)
+      - CWA_URL=https://cwa.jcubhub.com
+      - CWA_USERNAME=
+      - CWA_PASSWORD=
+      # Webhook secret (optional)
+      - WEBHOOK_SECRET=
+    restart: unless-stopped
+    labels:
+      - "net.unraid.docker.icon=https://raw.githubusercontent.com/DaddyJCub/jcubhub-books/main/backend/public/img/request.png"
+      - "net.unraid.docker.webui=http://[IP]:[PORT:3003]"

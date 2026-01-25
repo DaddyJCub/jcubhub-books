@@ -1,5 +1,11 @@
 FROM node:18-alpine
 
+# Image labels
+LABEL org.opencontainers.image.title="JcubHub Books"
+LABEL org.opencontainers.image.description="Book request and library portal with Readarr/CWA integration"
+LABEL org.opencontainers.image.source="https://github.com/DaddyJCub/jcubhub-books"
+LABEL org.opencontainers.image.licenses="MIT"
+
 # Install build tools for native modules (better-sqlite3)
 RUN apk add --no-cache python3 make g++
 
