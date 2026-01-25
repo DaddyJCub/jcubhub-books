@@ -23,7 +23,11 @@ COPY . .
 # Copy frontend assets from parent directory during build
 # Note: In docker-compose, we mount/copy books-landing-page to public
 
-# Create data directory for SQLite database
+# Data directory will be created by the app or mounted as volume
+# Setting DATA_PATH env var to ensure consistent path
+ENV DATA_PATH=/app/data
+
+# Create data directory (will be overwritten by volume mount if used)
 RUN mkdir -p /app/data
 
 # Expose port 3003 (unified server)

@@ -63,7 +63,24 @@ const integrations = {
 logger.info('Integrations Status:', integrations);
 
 // Initialize SQLite database
-const dbPath = path.join(__dirname, 'data', 'books.db');
+// Use DATA_PATH env var if set (for Docker volume mounts), otherwise fallback to local data folder
+const dataDir = process.env.DATA_PATH || path.join(__dirname, 'data');
+const dbPath = path.join(dataDir, 'books.db');
+
+// Ensure data directory exists (important for volume mounts)
+const fs = require('fs');
+if (!fs.existsSync(dataDir)) {
+  logger.info('Creating data directory', { path: dataDir });
+  fs.mkdirSync(dataDir, { recursive: true });
+}
+
+logger.info('Database Configuration:', { 
+  dataDir, 
+  dbPath,
+  dirExists: fs.existsSync(dataDir),
+  dbExists: fs.existsSync(dbPath)
+});
+
 const db = new Database(dbPath);
 
 // Database initialization

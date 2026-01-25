@@ -42,6 +42,11 @@
       <Mode/>
     </Variable>
     <Variable>
+      <Value>/app/data</Value>
+      <Name>DATA_PATH</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
       <Value>admin</Value>
       <Name>ADMIN_USERNAME</Name>
       <Mode/>
