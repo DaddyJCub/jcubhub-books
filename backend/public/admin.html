@@ -507,13 +507,18 @@
     <section class="requests-section">
       <div class="section-header">
         <h2 class="section-title">Book Requests</h2>
-        <div class="filter-tabs">
-          <button class="filter-tab active" data-filter="">All</button>
-          <button class="filter-tab" data-filter="pending">Pending</button>
-          <button class="filter-tab" data-filter="approved">Approved</button>
-          <button class="filter-tab" data-filter="searching">Searching</button>
-          <button class="filter-tab" data-filter="completed">Completed</button>
-          <button class="filter-tab" data-filter="rejected">Rejected</button>
+        <div style="display: flex; align-items: center; gap: 15px;">
+          <input type="text" id="searchInput" placeholder="Search books or authors..." 
+            style="padding: 8px 16px; background: var(--bg-input); border: 1px solid var(--border-medium); 
+            border-radius: var(--radius-md); color: var(--text-primary); width: 250px;">
+          <div class="filter-tabs">
+            <button class="filter-tab active" data-filter="">All</button>
+            <button class="filter-tab" data-filter="pending">Pending</button>
+            <button class="filter-tab" data-filter="approved">Approved</button>
+            <button class="filter-tab" data-filter="searching">Searching</button>
+            <button class="filter-tab" data-filter="completed">Completed</button>
+            <button class="filter-tab" data-filter="rejected">Rejected</button>
+          </div>
         </div>
       </div>
 
@@ -543,6 +548,7 @@
     // State
     let authToken = localStorage.getItem('adminToken');
     let currentFilter = '';
+    let searchQuery = '';
     let requests = [];
 
     // Initialize
@@ -560,6 +566,16 @@
           currentFilter = tab.dataset.filter;
           loadRequests();
         });
+      });
+
+      // Search input with debounce
+      let searchTimeout;
+      document.getElementById('searchInput').addEventListener('input', (e) => {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(() => {
+          searchQuery = e.target.value.toLowerCase();
+          renderRequests();
+        }, 300);
       });
     });
 
@@ -692,61 +708,7 @@
         const response = await apiCall(url);
         const data = await response.json();
         requests = data.requests;
-
-        if (requests.length === 0) {
-          container.innerHTML = `
-            <div class="empty-state">
-              <svg viewBox="0 0 24 24" fill="currentColor">
-                <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/>
-              </svg>
-              <p>No requests found</p>
-            </div>
-          `;
-          return;
-        }
-
-        container.innerHTML = `
-          <table class="requests-table">
-            <thead>
-              <tr>
-                <th>Book</th>
-                <th>Requester</th>
-                <th>Format</th>
-                <th>Status</th>
-                <th>CWA</th>
-                <th>Date</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${requests.map(req => `
-                <tr>
-                  <td>
-                    <strong>${escapeHtml(req.book_title)}</strong><br>
-                    <span style="color: var(--text-muted); font-size: 0.9rem;">by ${escapeHtml(req.author)}</span>
-                  </td>
-                  <td>
-                    ${escapeHtml(req.requester_name)}<br>
-                    <span style="color: var(--text-muted); font-size: 0.85rem;">${escapeHtml(req.requester_email)}</span>
-                  </td>
-                  <td style="text-transform: uppercase;">${req.format}</td>
-                  <td><span class="status-badge status-${req.status}">${req.status}</span></td>
-                  <td>
-                    <span class="cwa-badge ${req.cwa_available ? '' : 'unavailable'}">
-                      ${req.cwa_available ? '✓ Available' : '✗ Not found'}
-                    </span>
-                  </td>
-                  <td>${formatDate(req.created_at)}</td>
-                  <td>
-                    <button class="action-btn" data-action="view" data-id="${req.id}">View</button>
-                    ${req.readarr_url ? `<a href="${req.readarr_url}" target="_blank" class="action-btn">Readarr</a>` : ''}
-                    ${req.status === 'pending' ? `<button class="action-btn primary" data-action="add-readarr" data-id="${req.id}">Add</button>` : ''}
-                  </td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        `;
+        renderRequests();
       } catch (error) {
         container.innerHTML = `
           <div class="empty-state">
@@ -754,6 +716,105 @@
           </div>
         `;
       }
+    }
+
+    function renderRequests() {
+      const container = document.getElementById('requestsContent');
+      
+      // Filter by search query
+      let filteredRequests = requests;
+      if (searchQuery) {
+        filteredRequests = requests.filter(req => 
+          req.book_title.toLowerCase().includes(searchQuery) ||
+          req.author.toLowerCase().includes(searchQuery) ||
+          req.requester_name.toLowerCase().includes(searchQuery) ||
+          req.requester_email.toLowerCase().includes(searchQuery)
+        );
+      }
+
+      if (filteredRequests.length === 0) {
+        container.innerHTML = `
+          <div class="empty-state">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/>
+            </svg>
+            <p>${searchQuery ? 'No matching requests' : 'No requests found'}</p>
+          </div>
+        `;
+        return;
+      }
+
+      container.innerHTML = `
+        <table class="requests-table">
+          <thead>
+            <tr>
+              <th>Book</th>
+              <th>Requester</th>
+              <th>Format</th>
+              <th>Status</th>
+              <th>CWA</th>
+              <th>Date</th>
+              <th>Quick Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filteredRequests.map(req => `
+              <tr>
+                <td>
+                  <strong>${escapeHtml(req.book_title)}</strong><br>
+                  <span style="color: var(--text-muted); font-size: 0.9rem;">by ${escapeHtml(req.author)}</span>
+                </td>
+                <td>
+                  ${escapeHtml(req.requester_name)}<br>
+                  <span style="color: var(--text-muted); font-size: 0.85rem;">${escapeHtml(req.requester_email)}</span>
+                </td>
+                <td style="text-transform: uppercase;">${req.format}</td>
+                <td><span class="status-badge status-${req.status}">${req.status}</span></td>
+                <td>
+                  <span class="cwa-badge ${req.cwa_available ? '' : 'unavailable'}">
+                    ${req.cwa_available ? '✓ Available' : '✗ Not found'}
+                  </span>
+                </td>
+                <td>${formatDate(req.created_at)}</td>
+                <td>
+                  ${getQuickActions(req)}
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
+    function getQuickActions(req) {
+      const actions = [];
+      
+      // View details always available
+      actions.push(`<button class="action-btn" data-action="view" data-id="${req.id}" title="View Details">👁️</button>`);
+      
+      // Readarr link if available
+      if (req.readarr_url) {
+        actions.push(`<a href="${req.readarr_url}" target="_blank" class="action-btn" title="Search in Readarr">🔍</a>`);
+      }
+      
+      // Status-specific quick actions
+      if (req.status === 'pending') {
+        // Approve & Add to Readarr (one click)
+        actions.push(`<button class="action-btn primary" data-action="approve-add" data-id="${req.id}" title="Approve & Add to Readarr">✓ Add</button>`);
+        // Quick reject
+        actions.push(`<button class="action-btn" data-action="quick-reject" data-id="${req.id}" title="Reject" style="color: #ef4444;">✗</button>`);
+      } else if (req.status === 'approved') {
+        // Add to Readarr if not already searching
+        actions.push(`<button class="action-btn primary" data-action="add-readarr" data-id="${req.id}" title="Add to Readarr">📥 Readarr</button>`);
+      } else if (req.status === 'searching' || req.status === 'downloading') {
+        // Mark as completed
+        actions.push(`<button class="action-btn" data-action="quick-complete" data-id="${req.id}" title="Mark Completed" style="color: #22c55e;">✓ Done</button>`);
+      }
+      
+      // Delete button for all
+      actions.push(`<button class="action-btn" data-action="delete" data-id="${req.id}" title="Delete" style="color: #ef4444; opacity: 0.6;">🗑️</button>`);
+      
+      return actions.join('');
     }
 
     // Request actions
@@ -872,11 +933,107 @@
         if (result.success) {
           showToast('Book added to Readarr', 'success');
           loadRequests();
+          loadStats();
         } else {
           showToast(result.error || 'Failed to add to Readarr', 'error');
         }
       } catch (error) {
         showToast('Failed to add to Readarr', 'error');
+      }
+    }
+
+    // Quick action: Approve and add to Readarr in one click
+    async function approveAndAdd(id) {
+      showToast('Approving and adding to Readarr...', '');
+      
+      try {
+        const response = await apiCall(`/api/admin/requests/${id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ 
+            status: 'approved', 
+            addToReadarr: true,
+            notes: 'Approved and sent to Readarr'
+          })
+        });
+
+        const result = await response.json();
+        
+        if (response.ok) {
+          if (result.readarrResult?.success) {
+            showToast('Approved and added to Readarr!', 'success');
+          } else {
+            showToast('Approved, but Readarr add failed: ' + (result.readarrResult?.error || 'Unknown error'), 'error');
+          }
+          loadRequests();
+          loadStats();
+        } else {
+          showToast(result.error || 'Failed to approve', 'error');
+        }
+      } catch (error) {
+        showToast('Failed to approve', 'error');
+      }
+    }
+
+    // Quick action: Reject request
+    async function quickReject(id) {
+      if (!confirm('Are you sure you want to reject this request?')) return;
+      
+      try {
+        const response = await apiCall(`/api/admin/requests/${id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ status: 'rejected', notes: 'Quick rejected by admin' })
+        });
+
+        if (response.ok) {
+          showToast('Request rejected', 'success');
+          loadRequests();
+          loadStats();
+        } else {
+          showToast('Failed to reject', 'error');
+        }
+      } catch (error) {
+        showToast('Failed to reject', 'error');
+      }
+    }
+
+    // Quick action: Mark as completed
+    async function quickComplete(id) {
+      try {
+        const response = await apiCall(`/api/admin/requests/${id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ status: 'completed', notes: 'Marked complete by admin' })
+        });
+
+        if (response.ok) {
+          showToast('Marked as completed! User notified.', 'success');
+          loadRequests();
+          loadStats();
+        } else {
+          showToast('Failed to complete', 'error');
+        }
+      } catch (error) {
+        showToast('Failed to complete', 'error');
+      }
+    }
+
+    // Delete request
+    async function deleteRequest(id) {
+      if (!confirm('Are you sure you want to delete this request? This cannot be undone.')) return;
+      
+      try {
+        const response = await apiCall(`/api/admin/requests/${id}`, {
+          method: 'DELETE'
+        });
+
+        if (response.ok) {
+          showToast('Request deleted', 'success');
+          loadRequests();
+          loadStats();
+        } else {
+          showToast('Failed to delete', 'error');
+        }
+      } catch (error) {
+        showToast('Failed to delete', 'error');
       }
     }
 
@@ -957,6 +1114,14 @@
         viewDetails(target.dataset.id);
       } else if (target.matches('[data-action="add-readarr"]')) {
         addToReadarr(target.dataset.id);
+      } else if (target.matches('[data-action="approve-add"]')) {
+        approveAndAdd(target.dataset.id);
+      } else if (target.matches('[data-action="quick-reject"]')) {
+        quickReject(target.dataset.id);
+      } else if (target.matches('[data-action="quick-complete"]')) {
+        quickComplete(target.dataset.id);
+      } else if (target.matches('[data-action="delete"]')) {
+        deleteRequest(target.dataset.id);
       } else if (target.matches('#updateStatusBtn')) {
         updateStatus(target.dataset.id);
       }

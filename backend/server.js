@@ -18,6 +18,9 @@ const app = express();
 const PORT = process.env.PORT || 3003;
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info'; // debug, info, warn, error
 
+// Trust proxy for Docker/reverse proxy setups (fixes X-Forwarded-For warnings)
+app.set('trust proxy', 1);
+
 // ============================================
 // Logging Utility
 // ============================================
@@ -730,7 +733,8 @@ app.patch('/api/admin/requests/:id',
   authenticateToken,
   [
     body('status').optional().isIn(['pending', 'approved', 'searching', 'downloading', 'completed', 'rejected', 'unavailable']),
-    body('notes').optional().trim()
+    body('notes').optional().trim(),
+    body('addToReadarr').optional().isBoolean()
   ],
   async (req, res) => {
     const errors = validationResult(req);
@@ -743,8 +747,9 @@ app.patch('/api/admin/requests/:id',
       return res.status(404).json({ error: 'Request not found' });
     }
 
-    const { status, notes } = req.body;
+    const { status, notes, addToReadarr } = req.body;
     const now = new Date().toISOString();
+    let readarrResult = null;
 
     if (status) {
       // Update request
@@ -754,6 +759,25 @@ app.patch('/api/admin/requests/:id',
       db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
         req.params.id, status, now, notes || ''
       );
+
+      // Auto-add to Readarr if requested (typically when approving)
+      if (addToReadarr) {
+        readarrResult = await addBookToReadarr({
+          bookTitle: request.book_title,
+          author: request.author
+        });
+        
+        if (readarrResult.success) {
+          // Update status to searching
+          db.prepare("UPDATE requests SET status = 'searching', updated_at = ? WHERE id = ?").run(now, req.params.id);
+          db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
+            req.params.id, 'searching', now, 'Automatically added to Readarr'
+          );
+          logger.info('Auto-added to Readarr', { requestId: req.params.id, bookTitle: request.book_title });
+        } else {
+          logger.warn('Failed to auto-add to Readarr', { requestId: req.params.id, error: readarrResult.error });
+        }
+      }
 
       // Send notification email if status is completed and user opted in
       if (status === 'completed' && request.notify_on_complete) {
@@ -779,12 +803,16 @@ app.patch('/api/admin/requests/:id',
         requestId: req.params.id, 
         oldStatus: request.status, 
         newStatus: status,
-        admin: req.user.username
+        admin: req.user.username,
+        addedToReadarr: readarrResult?.success || false
       });
     }
 
     const updated = db.prepare('SELECT * FROM requests WHERE id = ?').get(req.params.id);
-    res.json(updated);
+    res.json({ 
+      ...updated, 
+      readarrResult: readarrResult 
+    });
   }
 );
 
