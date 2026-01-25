@@ -526,6 +526,17 @@ async function addBookToReadarr(bookData) {
     if (!searchResult) {
       return { success: false, error: 'Book not found in Readarr' };
     }
+    
+    // Debug: Log the structure of the search result
+    logger.info('Readarr search result structure', {
+      hasAuthor: !!searchResult.author,
+      authorId: searchResult.author?.id,
+      authorName: searchResult.author?.authorName,
+      foreignAuthorId: searchResult.author?.foreignAuthorId,
+      foreignBookId: searchResult.foreignBookId,
+      bookTitle: searchResult.title,
+      editions: searchResult.editions?.length || 0
+    });
 
     // Get quality profiles
     const profilesResponse = await fetch(`${process.env.READARR_URL}/api/v1/qualityprofile`, {
@@ -577,8 +588,28 @@ async function addBookToReadarr(bookData) {
       authorName: searchResult.author?.authorName || searchResult.authorName
     });
 
-    // Check if author exists, if not add them first
+    // Check if author already exists in Readarr
     let authorId = searchResult.author?.id;
+    const foreignAuthorId = searchResult.author?.foreignAuthorId;
+    
+    if (!authorId && foreignAuthorId) {
+      // Search for existing author by foreignAuthorId
+      try {
+        const existingAuthorsResponse = await fetch(`${process.env.READARR_URL}/api/v1/author`, {
+          headers: { 'X-Api-Key': process.env.READARR_API_KEY }
+        });
+        if (existingAuthorsResponse.ok) {
+          const existingAuthors = await existingAuthorsResponse.json();
+          const existingAuthor = existingAuthors.find(a => a.foreignAuthorId === foreignAuthorId);
+          if (existingAuthor) {
+            authorId = existingAuthor.id;
+            logger.info('Found existing author in Readarr', { authorId, authorName: existingAuthor.authorName });
+          }
+        }
+      } catch (e) {
+        logger.warn('Error checking for existing author', { error: e.message });
+      }
+    }
     
     if (!authorId && searchResult.author) {
       // Need to add author first
@@ -587,6 +618,7 @@ async function addBookToReadarr(bookData) {
         qualityProfileId: qualityProfileId,
         metadataProfileId: metadataProfileId,
         rootFolderPath: rootFolderPath,
+        path: `${rootFolderPath}/${searchResult.author.authorName || 'Unknown'}`,
         monitored: true,
         addOptions: {
           monitor: 'all',
@@ -594,7 +626,7 @@ async function addBookToReadarr(bookData) {
         }
       };
       
-      logger.info('Adding author to Readarr first', { authorName: searchResult.author.authorName });
+      logger.info('Adding author to Readarr first', { authorName: searchResult.author.authorName, path: authorToAdd.path });
       
       const authorResponse = await fetch(`${process.env.READARR_URL}/api/v1/author`, {
         method: 'POST',
@@ -611,8 +643,8 @@ async function addBookToReadarr(bookData) {
         logger.info('Author added to Readarr', { authorId, authorName: addedAuthor.authorName });
       } else {
         const authorError = await authorResponse.text();
-        // Author might already exist - try to continue anyway
-        logger.warn('Author add response', { status: authorResponse.status, error: authorError });
+        logger.warn('Author add failed', { status: authorResponse.status, error: authorError });
+        // Try to parse and see if it's because author exists
       }
     }
 
@@ -635,7 +667,26 @@ async function addBookToReadarr(bookData) {
       bookToAdd.author.qualityProfileId = qualityProfileId;
       bookToAdd.author.metadataProfileId = metadataProfileId;
       bookToAdd.author.rootFolderPath = rootFolderPath;
+      bookToAdd.author.path = `${rootFolderPath}/${bookToAdd.author.authorName || 'Unknown'}`;
+      if (authorId) {
+        bookToAdd.author.id = authorId;
+      }
     }
+
+    // Debug: Log key fields of bookToAdd
+    logger.info('Readarr book payload', {
+      title: bookToAdd.title,
+      foreignBookId: bookToAdd.foreignBookId,
+      authorId: bookToAdd.authorId,
+      authorName: bookToAdd.author?.authorName,
+      authorForeignId: bookToAdd.author?.foreignAuthorId,
+      qualityProfileId: bookToAdd.qualityProfileId,
+      metadataProfileId: bookToAdd.metadataProfileId,
+      rootFolderPath: bookToAdd.rootFolderPath,
+      authorPath: bookToAdd.author?.path,
+      monitored: bookToAdd.monitored,
+      addOptions: bookToAdd.addOptions
+    });
 
     // Add the book to Readarr
     const response = await fetch(`${process.env.READARR_URL}/api/v1/book`, {
@@ -651,8 +702,36 @@ async function addBookToReadarr(bookData) {
       const data = await response.json();
       logger.info('Book added to Readarr successfully', { 
         bookTitle: bookData.bookTitle,
-        readarrBookId: data.id 
+        readarrBookId: data.id,
+        readarrAuthorId: data.authorId,
+        monitored: data.monitored,
+        grabbed: data.grabbed,
+        authorMonitored: data.author?.monitored
       });
+      
+      // Trigger a search for the book
+      try {
+        const searchCommand = {
+          name: 'BookSearch',
+          bookIds: [data.id]
+        };
+        const searchResponse = await fetch(`${process.env.READARR_URL}/api/v1/command`, {
+          method: 'POST',
+          headers: {
+            'X-Api-Key': process.env.READARR_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(searchCommand)
+        });
+        if (searchResponse.ok) {
+          logger.info('Book search triggered in Readarr', { bookId: data.id });
+        } else {
+          logger.warn('Failed to trigger book search', { status: searchResponse.status });
+        }
+      } catch (searchError) {
+        logger.warn('Error triggering book search', { error: searchError.message });
+      }
+      
       return { success: true, data };
     } else {
       const errorText = await response.text();
