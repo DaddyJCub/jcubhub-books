@@ -890,6 +890,7 @@
                 <td>
                   <strong>${escapeHtml(req.book_title)}</strong><br>
                   <span style="color: var(--text-muted); font-size: 0.9rem;">by ${escapeHtml(req.author)}</span>
+                  ${req.isbn ? `<br><span style="color: var(--primary); font-size: 0.8rem;">ISBN: ${escapeHtml(req.isbn)}</span>` : ''}
                 </td>
                 <td>
                   ${escapeHtml(req.requester_name)}<br>
@@ -965,6 +966,12 @@
             <span class="detail-label">Book:</span>
             <span class="detail-value"><strong>${escapeHtml(req.book_title)}</strong> by ${escapeHtml(req.author)}</span>
           </div>
+          ${req.isbn ? `
+          <div class="detail-row">
+            <span class="detail-label">ISBN:</span>
+            <span class="detail-value" style="font-family: monospace; color: var(--primary);">${escapeHtml(req.isbn)}</span>
+          </div>
+          ` : ''}
           <div class="detail-row">
             <span class="detail-label">Requester:</span>
             <span class="detail-value">${escapeHtml(req.requester_name)} (${escapeHtml(req.requester_email)})</span>

@@ -104,6 +104,7 @@ function initDatabase() {
       requester_email TEXT NOT NULL,
       book_title TEXT NOT NULL,
       author TEXT NOT NULL,
+      isbn TEXT,
       format TEXT NOT NULL,
       notes TEXT,
       status TEXT DEFAULT 'pending',
@@ -134,6 +135,14 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_requests_email ON requests(requester_email);
     CREATE INDEX IF NOT EXISTS idx_status_history_request ON status_history(request_id);
   `);
+
+  // Migration: Add ISBN column if it doesn't exist (for existing databases)
+  try {
+    db.exec(`ALTER TABLE requests ADD COLUMN isbn TEXT`);
+    logger.info('Migration: Added ISBN column to requests table');
+  } catch (e) {
+    // Column already exists, ignore
+  }
 
   // Create default admin if not exists
   const adminExists = db.prepare('SELECT COUNT(*) as count FROM admin_users').get();
@@ -355,9 +364,12 @@ function wrapEmailHtml(content, title = 'JcubHub Books') {
 </html>`;
 }
 
-function generateReadarrUrl(author, bookTitle) {
+function generateReadarrUrl(author, bookTitle, isbn) {
   if (!process.env.READARR_URL) return null;
-  const searchQuery = encodeURIComponent(`${author} ${bookTitle}`);
+  // Use ISBN if available for more accurate search
+  const searchQuery = isbn 
+    ? encodeURIComponent(isbn) 
+    : encodeURIComponent(`${author} ${bookTitle}`);
   return `${process.env.READARR_URL}/add/search?term=${searchQuery}`;
 }
 
@@ -387,13 +399,17 @@ async function checkCwaAvailability(bookTitle, author) {
   }
 }
 
-async function searchReadarr(bookTitle, author) {
+async function searchReadarr(bookTitle, author, isbn) {
   if (!process.env.READARR_URL || !process.env.READARR_API_KEY) {
     return null;
   }
 
   try {
-    const searchQuery = encodeURIComponent(`${author} ${bookTitle}`);
+    // Use ISBN if available for more accurate search
+    const searchQuery = isbn 
+      ? encodeURIComponent(isbn)
+      : encodeURIComponent(`${author} ${bookTitle}`);
+    
     const response = await fetch(`${process.env.READARR_URL}/api/v1/book/lookup?term=${searchQuery}`, {
       headers: {
         'X-Api-Key': process.env.READARR_API_KEY
@@ -403,10 +419,10 @@ async function searchReadarr(bookTitle, author) {
     if (!response.ok) return null;
 
     const books = await response.json();
-    logger.debug('Readarr search result', { bookTitle, author, found: books.length });
+    logger.debug('Readarr search result', { bookTitle, author, isbn, found: books.length });
     return books.length > 0 ? books[0] : null;
   } catch (error) {
-    logger.error('Readarr search error', { bookTitle, author, error: error.message });
+    logger.error('Readarr search error', { bookTitle, author, isbn, error: error.message });
     return null;
   }
 }
@@ -417,8 +433,8 @@ async function addBookToReadarr(bookData) {
   }
 
   try {
-    // First search for the book
-    const searchResult = await searchReadarr(bookData.bookTitle, bookData.author);
+    // First search for the book (use ISBN if available for accuracy)
+    const searchResult = await searchReadarr(bookData.bookTitle, bookData.author, bookData.isbn);
     if (!searchResult) {
       return { success: false, error: 'Book not found in Readarr' };
     }
@@ -447,7 +463,7 @@ async function addBookToReadarr(bookData) {
       return { success: false, error: errorData.message || 'Failed to add book' };
     }
   } catch (error) {
-    console.error('Readarr add book error:', error);
+    logger.error('Readarr add book error', { error: error.message });
     return { success: false, error: error.message };
   }
 }
@@ -508,6 +524,7 @@ app.post('/api/book-request',
     body('requesterEmail').isEmail().normalizeEmail().withMessage('Valid email is required'),
     body('bookTitle').trim().notEmpty().withMessage('Book title is required'),
     body('author').trim().notEmpty().withMessage('Author is required'),
+    body('isbn').optional().trim().matches(/^[\dXx]{10,13}$/).withMessage('Invalid ISBN format'),
     body('format').isIn(['epub', 'pdf', 'mobi', 'any']).withMessage('Invalid format'),
     body('notes').optional().trim(),
     body('notifyOnComplete').optional().isBoolean(),
@@ -519,7 +536,7 @@ app.post('/api/book-request',
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { requesterName, requesterEmail, bookTitle, author, format, notes, notifyOnComplete, turnstileToken } = req.body;
+    const { requesterName, requesterEmail, bookTitle, author, isbn, format, notes, notifyOnComplete, turnstileToken } = req.body;
 
     // Verify Turnstile
     const isValidCaptcha = await verifyTurnstile(turnstileToken);
@@ -542,16 +559,16 @@ app.post('/api/book-request',
 
     const now = new Date().toISOString();
     const id = generateId();
-    const readarrUrl = generateReadarrUrl(author, bookTitle);
+    const readarrUrl = generateReadarrUrl(author, bookTitle, isbn);
 
     // Check CWA availability
     const cwaAvailable = await checkCwaAvailability(bookTitle, author);
 
     // Insert request
     db.prepare(`
-      INSERT INTO requests (id, requester_name, requester_email, book_title, author, format, notes, status, notify_on_complete, readarr_url, cwa_available, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
-    `).run(id, requesterName, requesterEmail, bookTitle, author, format, notes || '', notifyOnComplete !== false ? 1 : 0, readarrUrl, cwaAvailable ? 1 : 0, now, now);
+      INSERT INTO requests (id, requester_name, requester_email, book_title, author, isbn, format, notes, status, notify_on_complete, readarr_url, cwa_available, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+    `).run(id, requesterName, requesterEmail, bookTitle, author, isbn || null, format, notes || '', notifyOnComplete !== false ? 1 : 0, readarrUrl, cwaAvailable ? 1 : 0, now, now);
 
     // Add initial status history
     db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
@@ -649,8 +666,8 @@ app.post('/api/book-request',
     // Auto-add to Readarr if enabled and book not already in CWA
     if (automation.autoAddToReadarr && !cwaAvailable && integrations.readarr) {
       try {
-        logger.info('Auto-adding to Readarr...', { requestId: id, bookTitle });
-        const readarrResult = await addBookToReadarr({ bookTitle, author });
+        logger.info('Auto-adding to Readarr...', { requestId: id, bookTitle, isbn });
+        const readarrResult = await addBookToReadarr({ bookTitle, author, isbn });
         
         if (readarrResult.success) {
           const updateNow = new Date().toISOString();
@@ -794,7 +811,8 @@ app.patch('/api/admin/requests/:id',
       if (addToReadarr) {
         readarrResult = await addBookToReadarr({
           bookTitle: request.book_title,
-          author: request.author
+          author: request.author,
+          isbn: request.isbn
         });
         
         if (readarrResult.success) {
@@ -904,7 +922,8 @@ app.post('/api/admin/batch/process-pending', authenticateToken, async (req, res)
     try {
       const readarrResult = await addBookToReadarr({
         bookTitle: request.book_title,
-        author: request.author
+        author: request.author,
+        isbn: request.isbn
       });
 
       const now = new Date().toISOString();
@@ -1043,7 +1062,8 @@ app.post('/api/admin/readarr/add', authenticateToken, async (req, res) => {
 
   const result = await addBookToReadarr({
     bookTitle: request.book_title,
-    author: request.author
+    author: request.author,
+    isbn: request.isbn
   });
 
   if (result.success) {
