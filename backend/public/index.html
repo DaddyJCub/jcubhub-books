@@ -21,7 +21,7 @@
   <div class="main-container">
     <div class="split">
       <!-- Request Card -->
-      <div class="card request-card" onclick="showRequestForm()">
+      <div class="card request-card" id="requestCard">
         <div class="card-content">
           <div class="card-icon">
             <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -34,7 +34,7 @@
       </div>
 
       <!-- Download Card -->
-      <div class="card download-card" onclick="showLoginInfo()">
+      <div class="card download-card" id="downloadCard">
         <div class="card-content">
           <div class="card-icon">
             <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -55,7 +55,7 @@
 
   <!-- Request Form Overlay -->
   <div class="request-form-container" id="requestFormContainer">
-    <button class="back-button" onclick="hideRequestForm()">
+    <button class="back-button" id="backButton">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
         <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
       </svg>
@@ -66,7 +66,7 @@
       <h2 class="form-title">Request a Book</h2>
       <p class="form-subtitle">Fill out the form below and we'll try to add your book to the library</p>
       
-      <form id="requestForm" onsubmit="submitRequest(event)">
+      <form id="requestForm">
         <div class="form-group">
           <label for="requesterName">Your Name</label>
           <input type="text" id="requesterName" name="requesterName" placeholder="Enter your name" required>
@@ -110,7 +110,7 @@
 
         <!-- Cloudflare Turnstile Widget -->
         <div class="turnstile-container">
-          <div class="cf-turnstile" data-sitekey="0x4AAAAAABznZ0it4DVwFAV4" data-callback="onTurnstileSuccess" data-expired-callback="onTurnstileExpired"></div>
+          <div id="turnstileWidget"></div>
         </div>
 
         <button type="submit" class="submit-button" id="submitBtn" disabled>
@@ -143,8 +143,8 @@
         If you don't have credentials yet, please contact the administrator.
       </p>
       <div class="popup-buttons">
-        <button class="popup-button popup-button-primary" onclick="goToLibrary()">Go to Library</button>
-        <button class="popup-button popup-button-secondary" onclick="hideLoginInfo()">Cancel</button>
+        <button class="popup-button popup-button-primary" id="goToLibraryBtn">Go to Library</button>
+        <button class="popup-button popup-button-secondary" id="cancelLoginBtn">Cancel</button>
       </div>
     </div>
   </div>
@@ -167,8 +167,9 @@
     
     createParticles();
 
-    // Turnstile token
+    // Turnstile token and widget ID
     let turnstileToken = null;
+    let turnstileWidgetId = null;
 
     function onTurnstileSuccess(token) {
       turnstileToken = token;
@@ -178,6 +179,27 @@
     function onTurnstileExpired() {
       turnstileToken = null;
       document.getElementById('submitBtn').disabled = true;
+    }
+
+    // Initialize Turnstile when API is ready
+    function initTurnstile() {
+      if (typeof turnstile !== 'undefined' && document.getElementById('turnstileWidget')) {
+        turnstileWidgetId = turnstile.render('#turnstileWidget', {
+          sitekey: '0x4AAAAAABznZ0it4DVwFAV4',
+          callback: onTurnstileSuccess,
+          'expired-callback': onTurnstileExpired
+        });
+      }
+    }
+
+    // Check if Turnstile is loaded, otherwise wait for it
+    if (typeof turnstile !== 'undefined') {
+      initTurnstile();
+    } else {
+      window.addEventListener('load', function() {
+        // Small delay to ensure Turnstile API is fully loaded
+        setTimeout(initTurnstile, 100);
+      });
     }
 
     // Form visibility
@@ -212,8 +234,8 @@
       document.getElementById('successMessage').classList.remove('show');
       document.getElementById('submitBtn').disabled = true;
       // Reset Turnstile
-      if (typeof turnstile !== 'undefined') {
-        turnstile.reset();
+      if (typeof turnstile !== 'undefined' && turnstileWidgetId !== null) {
+        turnstile.reset(turnstileWidgetId);
       }
       turnstileToken = null;
     }
@@ -273,8 +295,8 @@
           submitBtn.disabled = false;
           submitBtn.textContent = 'Submit Request';
           // Reset Turnstile on error
-          if (typeof turnstile !== 'undefined') {
-            turnstile.reset();
+          if (typeof turnstile !== 'undefined' && turnstileWidgetId !== null) {
+            turnstile.reset(turnstileWidgetId);
           }
           turnstileToken = null;
         }
@@ -284,8 +306,8 @@
         submitBtn.disabled = false;
         submitBtn.textContent = 'Submit Request';
         // Reset Turnstile on error
-        if (typeof turnstile !== 'undefined') {
-          turnstile.reset();
+        if (typeof turnstile !== 'undefined' && turnstileWidgetId !== null) {
+          turnstile.reset(turnstileWidgetId);
         }
         turnstileToken = null;
       }
@@ -311,6 +333,14 @@
         hideLoginInfo();
       }
     });
+
+    // Event listeners for interactive elements (CSP-compliant)
+    document.getElementById('requestCard').addEventListener('click', showRequestForm);
+    document.getElementById('downloadCard').addEventListener('click', showLoginInfo);
+    document.getElementById('backButton').addEventListener('click', hideRequestForm);
+    document.getElementById('requestForm').addEventListener('submit', submitRequest);
+    document.getElementById('goToLibraryBtn').addEventListener('click', goToLibrary);
+    document.getElementById('cancelLoginBtn').addEventListener('click', hideLoginInfo);
   </script>
 </body>
 </html>
