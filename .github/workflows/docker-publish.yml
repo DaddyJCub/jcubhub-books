@@ -41,12 +41,25 @@ jobs:
           node server.js &
           SERVER_PID=$!
           
-          # Wait for server to be ready
+          # Wait for server to be ready with retry loop
           echo "Waiting for server to start..."
-          sleep 5
+          max_attempts=30
+          attempt=0
+          while [ $attempt -lt $max_attempts ]; do
+            if curl -f http://localhost:3003/api/health 2>/dev/null | grep -q "healthy"; then
+              echo "Server is healthy!"
+              break
+            fi
+            attempt=$((attempt + 1))
+            echo "Attempt $attempt/$max_attempts - waiting..."
+            sleep 1
+          done
           
-          # Test health endpoint
-          curl -f http://localhost:3003/api/health || exit 1
+          if [ $attempt -eq $max_attempts ]; then
+            echo "Server failed to become healthy"
+            kill $SERVER_PID
+            exit 1
+          fi
           
           # Stop server
           kill $SERVER_PID
@@ -95,6 +108,7 @@ jobs:
             type=sha,prefix={{branch}}-
 
       - name: Build and push Docker image
+        id: build-push
         uses: docker/build-push-action@v5
         with:
           context: ./backend
@@ -106,5 +120,7 @@ jobs:
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
 
-      - name: Image digest
-        run: echo "Image pushed with digest ${{ steps.meta.outputs.tags }}"
+      - name: Display image information
+        run: |
+          echo "Image tags: ${{ steps.meta.outputs.tags }}"
+          echo "Image digest: ${{ steps.build-push.outputs.digest }}"
