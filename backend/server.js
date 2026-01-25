@@ -520,11 +520,12 @@ app.patch('/api/admin/requests/:id',
 
       // Send notification email if status is completed and user opted in
       if (status === 'completed' && request.notify_on_complete) {
+        const cwaLink = process.env.CWA_URL || 'https://cwa.jcubhub.com';
         await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', `
           <h2>Great News! Your Book is Ready</h2>
           <p>Hi ${request.requester_name},</p>
           <p>Your requested book "<strong>${request.book_title}</strong>" by ${request.author} is now available!</p>
-          <p>You can download it from our library at <a href="https://cwa.jcubhub.com">CWA</a>.</p>
+          <p>You can download it from our library at <a href="${cwaLink}">CWA</a>.</p>
           <br>
           <p>Happy reading!<br>JcubHub Books</p>
         `);
@@ -644,11 +645,12 @@ app.post('/api/webhook/book-complete',
 
         // Send notification if opted in
         if (request.notify_on_complete) {
+          const cwaLink = process.env.CWA_URL || 'https://cwa.jcubhub.com';
           await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', `
             <h2>Great News! Your Book is Ready</h2>
             <p>Hi ${request.requester_name},</p>
             <p>Your requested book "<strong>${request.book_title}</strong>" by ${request.author} is now available!</p>
-            <p>You can download it from our library at <a href="https://cwa.jcubhub.com">CWA</a>.</p>
+            <p>You can download it from our library at <a href="${cwaLink}">CWA</a>.</p>
             <br>
             <p>Happy reading!<br>JcubHub Books</p>
           `);
@@ -687,11 +689,12 @@ app.post('/api/admin/sync-cwa', authenticateToken, async (req, res) => {
 
       // Send notification if opted in
       if (request.notify_on_complete) {
+        const cwaLink = process.env.CWA_URL || 'https://cwa.jcubhub.com';
         await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', `
           <h2>Great News! Your Book is Ready</h2>
           <p>Hi ${request.requester_name},</p>
           <p>Your requested book "<strong>${request.book_title}</strong>" by ${request.author} is now available!</p>
-          <p>You can download it from our library at <a href="https://cwa.jcubhub.com">CWA</a>.</p>
+          <p>You can download it from our library at <a href="${cwaLink}">CWA</a>.</p>
           <br>
           <p>Happy reading!<br>JcubHub Books</p>
         `);
@@ -712,12 +715,12 @@ app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
-app.get('/admin/*', (req, res) => {
+app.get('/admin/{*splat}', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
 // Fallback to index.html for SPA routing
-app.get('*', (req, res) => {
+app.get('{*splat}', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
