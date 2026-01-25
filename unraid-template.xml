@@ -1,0 +1,125 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>jcubhub-books</Name>
+  <Repository>ghcr.io/daddyjcub/jcubhub-books:latest</Repository>
+  <Registry>https://ghcr.io/</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/DaddyJCub/jcubhub-books/issues</Support>
+  <Project>https://github.com/DaddyJCub/jcubhub-books</Project>
+  <Overview>Book request and library portal with Readarr/Chaptarr and Calibre Web Automated integration. Allows users to request books and admins to manage requests with automated downloads.</Overview>
+  <Category>MediaApp:Books</Category>
+  <WebUI>http://[IP]:[PORT:3003]</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/DaddyJCub/jcubhub-books/main/unraid-template.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/DaddyJCub/jcubhub-books/main/backend/public/img/request.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled></DateInstalled>
+  <Description>Book request and library portal with Readarr/Chaptarr and Calibre Web Automated integration.</Description>
+  <Networking>
+    <Mode>bridge</Mode>
+    <Publish>
+      <Port>
+        <HostPort>3003</HostPort>
+        <ContainerPort>3003</ContainerPort>
+        <Protocol>tcp</Protocol>
+      </Port>
+    </Publish>
+  </Networking>
+  <Data>
+    <Volume>
+      <HostDir>/mnt/user/appdata/jcubhub-books</HostDir>
+      <ContainerDir>/app/data</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+  </Data>
+  <Environment>
+    <Variable>
+      <Value>3003</Value>
+      <Name>PORT</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>admin</Value>
+      <Name>ADMIN_USERNAME</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>changeme</Value>
+      <Name>ADMIN_PASSWORD</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>JWT_SECRET</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>ADMIN_EMAIL</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>ZOHO_EMAIL</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>ZOHO_PASSWORD</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>TURNSTILE_SECRET_KEY</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>READARR_URL</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>READARR_API_KEY</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>CWA_URL</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>CWA_USERNAME</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>CWA_PASSWORD</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>WEBHOOK_SECRET</Name>
+      <Mode/>
+    </Variable>
+  </Environment>
+  <Config Name="Web UI Port" Target="3003" Default="3003" Mode="tcp" Description="Web interface port" Type="Port" Display="always" Required="true" Mask="false">3003</Config>
+  <Config Name="Data" Target="/app/data" Default="/mnt/user/appdata/jcubhub-books" Mode="rw" Description="Database storage location" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/jcubhub-books</Config>
+  <Config Name="Admin Username" Target="ADMIN_USERNAME" Default="admin" Mode="" Description="Admin login username" Type="Variable" Display="always" Required="true" Mask="false">admin</Config>
+  <Config Name="Admin Password" Target="ADMIN_PASSWORD" Default="changeme" Mode="" Description="Admin login password - CHANGE THIS!" Type="Variable" Display="always" Required="true" Mask="true">changeme</Config>
+  <Config Name="JWT Secret" Target="JWT_SECRET" Default="" Mode="" Description="Secret for JWT tokens (auto-generated if empty)" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+  <Config Name="Admin Email" Target="ADMIN_EMAIL" Default="" Mode="" Description="Email for admin notifications" Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Zoho Email" Target="ZOHO_EMAIL" Default="" Mode="" Description="Zoho Mail email address for sending notifications" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Zoho Password" Target="ZOHO_PASSWORD" Default="" Mode="" Description="Zoho Mail app password" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+  <Config Name="Turnstile Secret" Target="TURNSTILE_SECRET_KEY" Default="" Mode="" Description="Cloudflare Turnstile secret key" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+  <Config Name="Readarr URL" Target="READARR_URL" Default="" Mode="" Description="Readarr/Chaptarr server URL (e.g., http://192.168.1.100:8787)" Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Readarr API Key" Target="READARR_API_KEY" Default="" Mode="" Description="Readarr/Chaptarr API key" Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="CWA URL" Target="CWA_URL" Default="" Mode="" Description="Calibre Web Automated URL" Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="CWA Username" Target="CWA_USERNAME" Default="" Mode="" Description="CWA username for OPDS access" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="CWA Password" Target="CWA_PASSWORD" Default="" Mode="" Description="CWA password for OPDS access" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+  <Config Name="Webhook Secret" Target="WEBHOOK_SECRET" Default="" Mode="" Description="Secret for webhook verification (optional)" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+</Container>

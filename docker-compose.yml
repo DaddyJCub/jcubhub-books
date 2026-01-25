@@ -13,10 +13,20 @@ services:
       - ./backend/data:/app/data
       # Mount public assets (allows live updates during dev)
       - ./backend/public:/app/public:ro
-    env_file:
-      - .env
     environment:
       - PORT=3003
+      # Pass these via Unraid template or command line
+      # - ADMIN_USERNAME=admin
+      # - ADMIN_PASSWORD=changeme
+      # - JWT_SECRET=your-secret
+      # - ZOHO_EMAIL=
+      # - ZOHO_PASSWORD=
+      # - TURNSTILE_SECRET_KEY=
+      # - READARR_URL=
+      # - READARR_API_KEY=
+      # - CWA_URL=
+      # - CWA_USERNAME=
+      # - CWA_PASSWORD=
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3003/api/health"]
