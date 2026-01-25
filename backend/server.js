@@ -108,14 +108,21 @@ function initDatabase() {
 
   // Create default admin if not exists
   const adminExists = db.prepare('SELECT COUNT(*) as count FROM admin_users').get();
-  if (adminExists.count === 0 && process.env.ADMIN_USERNAME && process.env.ADMIN_PASSWORD) {
-    const passwordHash = bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10);
-    db.prepare('INSERT INTO admin_users (username, password_hash, created_at) VALUES (?, ?, ?)').run(
-      process.env.ADMIN_USERNAME,
-      passwordHash,
-      new Date().toISOString()
-    );
-    logger.info('Default admin user created', { username: process.env.ADMIN_USERNAME });
+  if (adminExists.count === 0) {
+    if (process.env.ADMIN_USERNAME && process.env.ADMIN_PASSWORD) {
+      const passwordHash = bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10);
+      db.prepare('INSERT INTO admin_users (username, password_hash, created_at) VALUES (?, ?, ?)').run(
+        process.env.ADMIN_USERNAME,
+        passwordHash,
+        new Date().toISOString()
+      );
+      logger.info('Default admin user created', { username: process.env.ADMIN_USERNAME });
+    } else {
+      logger.warn('No admin user exists and ADMIN_USERNAME/ADMIN_PASSWORD not set!');
+      logger.warn('Set these environment variables and restart to create admin user.');
+    }
+  } else {
+    logger.debug('Admin user already exists', { count: adminExists.count });
   }
   
   // Log database stats
@@ -128,7 +135,13 @@ function initDatabase() {
   });
 }
 
-initDatabase();
+// Initialize database with error handling
+try {
+  initDatabase();
+} catch (error) {
+  logger.error('Failed to initialize database', { error: error.message, stack: error.stack });
+  process.exit(1);
+}
 
 // Request logging middleware
 app.use((req, res, next) => {
@@ -260,7 +273,7 @@ async function sendEmail(to, subject, html) {
   }
 }
 
-// Styled email template wrapper
+// Styled email template wrapper - Light theme for better email client compatibility
 function wrapEmailHtml(content, title = 'JcubHub Books') {
   return `
 <!DOCTYPE html>
@@ -270,15 +283,15 @@ function wrapEmailHtml(content, title = 'JcubHub Books') {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${title}</title>
 </head>
-<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #0a0a0a; color: #ffffff;">
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 100%); min-height: 100vh;">
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f5f7; color: #1d1d1f;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color: #f5f5f7;">
     <tr>
       <td align="center" style="padding: 40px 20px;">
         <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="max-width: 600px; width: 100%;">
           <!-- Header -->
           <tr>
             <td align="center" style="padding-bottom: 30px;">
-              <h1 style="margin: 0; font-size: 28px; font-weight: 700; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">
+              <h1 style="margin: 0; font-size: 28px; font-weight: 700; color: #667eea;">
                 📚 JcubHub Books
               </h1>
             </td>
@@ -287,7 +300,7 @@ function wrapEmailHtml(content, title = 'JcubHub Books') {
           <!-- Main Content Card -->
           <tr>
             <td>
-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background: rgba(255, 255, 255, 0.05); border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.1); backdrop-filter: blur(10px);">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color: #ffffff; border-radius: 16px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);">
                 <tr>
                   <td style="padding: 40px;">
                     ${content}
@@ -300,7 +313,7 @@ function wrapEmailHtml(content, title = 'JcubHub Books') {
           <!-- Footer -->
           <tr>
             <td align="center" style="padding-top: 30px;">
-              <p style="margin: 0; font-size: 12px; color: rgba(255, 255, 255, 0.5);">
+              <p style="margin: 0; font-size: 12px; color: #86868b;">
                 © ${new Date().getFullYear()} JcubHub Books • Your Personal Library
               </p>
             </td>
@@ -519,22 +532,22 @@ app.post('/api/book-request',
     // Send confirmation email if opted in
     if (notifyOnComplete !== false) {
       const emailContent = `
-        <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #ffffff;">Book Request Received</h2>
-        <p style="margin: 0 0 15px 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">Hi ${requesterName},</p>
-        <p style="margin: 0 0 15px 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">
+        <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f;">Book Request Received</h2>
+        <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${requesterName},</p>
+        <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">
           We've received your request for "<strong style="color: #667eea;">${bookTitle}</strong>" by ${author}.
         </p>
-        <div style="background: rgba(102, 126, 234, 0.1); border-left: 4px solid #667eea; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
-          <p style="margin: 0; font-size: 14px; color: rgba(255, 255, 255, 0.7);">Request ID</p>
+        <div style="background: #f0f0ff; border-left: 4px solid #667eea; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
+          <p style="margin: 0; font-size: 14px; color: #86868b;">Request ID</p>
           <p style="margin: 5px 0 0 0; font-size: 18px; font-weight: 600; color: #667eea;">${id}</p>
         </div>
         ${cwaAvailable ? `
-        <div style="background: rgba(34, 197, 94, 0.1); border-left: 4px solid #22c55e; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
-          <p style="margin: 0; font-size: 14px; color: #22c55e;">✓ Good news! This book may already be available in our library.</p>
+        <div style="background: #f0fdf4; border-left: 4px solid #22c55e; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
+          <p style="margin: 0; font-size: 14px; color: #166534;">✓ Good news! This book may already be available in our library.</p>
         </div>
         ` : ''}
-        <p style="margin: 20px 0 0 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">We'll notify you when your request is processed.</p>
-        <p style="margin: 30px 0 0 0; font-size: 14px; color: rgba(255, 255, 255, 0.6);">Best regards,<br><strong style="color: #ffffff;">JcubHub Books</strong></p>
+        <p style="margin: 20px 0 0 0; font-size: 16px; color: #1d1d1f;">We'll notify you when your request is processed.</p>
+        <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b;">Best regards,<br><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
       `;
       await sendEmail(requesterEmail, 'Book Request Received - JcubHub Books', wrapEmailHtml(emailContent, 'Book Request Received'));
     }
@@ -542,42 +555,42 @@ app.post('/api/book-request',
     // Send admin notification
     if (process.env.ADMIN_EMAIL) {
       const adminEmailContent = `
-        <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #ffffff;">📬 New Book Request</h2>
+        <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f;">📬 New Book Request</h2>
         <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin: 20px 0;">
           <tr>
-            <td style="padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.1);">
-              <span style="color: rgba(255, 255, 255, 0.6); font-size: 14px;">Request ID</span><br>
+            <td style="padding: 10px 0; border-bottom: 1px solid #e5e5e5;">
+              <span style="color: #86868b; font-size: 14px;">Request ID</span><br>
               <span style="color: #667eea; font-size: 16px; font-weight: 600;">${id}</span>
             </td>
           </tr>
           <tr>
-            <td style="padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.1);">
-              <span style="color: rgba(255, 255, 255, 0.6); font-size: 14px;">From</span><br>
-              <span style="color: #ffffff; font-size: 16px;">${requesterName} (${requesterEmail})</span>
+            <td style="padding: 10px 0; border-bottom: 1px solid #e5e5e5;">
+              <span style="color: #86868b; font-size: 14px;">From</span><br>
+              <span style="color: #1d1d1f; font-size: 16px;">${requesterName} (${requesterEmail})</span>
             </td>
           </tr>
           <tr>
-            <td style="padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.1);">
-              <span style="color: rgba(255, 255, 255, 0.6); font-size: 14px;">Book</span><br>
-              <span style="color: #ffffff; font-size: 16px;"><strong>${bookTitle}</strong> by ${author}</span>
+            <td style="padding: 10px 0; border-bottom: 1px solid #e5e5e5;">
+              <span style="color: #86868b; font-size: 14px;">Book</span><br>
+              <span style="color: #1d1d1f; font-size: 16px;"><strong>${bookTitle}</strong> by ${author}</span>
             </td>
           </tr>
           <tr>
-            <td style="padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.1);">
-              <span style="color: rgba(255, 255, 255, 0.6); font-size: 14px;">Format</span><br>
-              <span style="color: #ffffff; font-size: 16px;">${format.toUpperCase()}</span>
+            <td style="padding: 10px 0; border-bottom: 1px solid #e5e5e5;">
+              <span style="color: #86868b; font-size: 14px;">Format</span><br>
+              <span style="color: #1d1d1f; font-size: 16px;">${format.toUpperCase()}</span>
             </td>
           </tr>
           <tr>
-            <td style="padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.1);">
-              <span style="color: rgba(255, 255, 255, 0.6); font-size: 14px;">Notes</span><br>
-              <span style="color: #ffffff; font-size: 16px;">${notes || 'None'}</span>
+            <td style="padding: 10px 0; border-bottom: 1px solid #e5e5e5;">
+              <span style="color: #86868b; font-size: 14px;">Notes</span><br>
+              <span style="color: #1d1d1f; font-size: 16px;">${notes || 'None'}</span>
             </td>
           </tr>
           <tr>
             <td style="padding: 10px 0;">
-              <span style="color: rgba(255, 255, 255, 0.6); font-size: 14px;">CWA Available</span><br>
-              <span style="color: ${cwaAvailable ? '#22c55e' : '#ef4444'}; font-size: 16px; font-weight: 600;">${cwaAvailable ? '✓ Yes' : '✗ No'}</span>
+              <span style="color: #86868b; font-size: 14px;">CWA Available</span><br>
+              <span style="color: ${cwaAvailable ? '#166534' : '#dc2626'}; font-size: 16px; font-weight: 600;">${cwaAvailable ? '✓ Yes' : '✗ No'}</span>
             </td>
           </tr>
         </table>
@@ -732,15 +745,15 @@ app.patch('/api/admin/requests/:id',
           <div style="text-align: center; margin-bottom: 30px;">
             <span style="font-size: 48px;">🎉</span>
           </div>
-          <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #ffffff; text-align: center;">Great News! Your Book is Ready</h2>
-          <p style="margin: 0 0 15px 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">Hi ${request.requester_name},</p>
-          <p style="margin: 0 0 20px 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">
+          <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Great News! Your Book is Ready</h2>
+          <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+          <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
             Your requested book "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} is now available in our library!
           </p>
           <div style="text-align: center; margin: 30px 0;">
             <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
           </div>
-          <p style="margin: 30px 0 0 0; font-size: 14px; color: rgba(255, 255, 255, 0.6); text-align: center;">Happy reading!<br><strong style="color: #ffffff;">JcubHub Books</strong></p>
+          <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b; text-align: center;">Happy reading!<br><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
         `;
         await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrapEmailHtml(readyEmailContent, 'Your Book is Ready'));
       }
@@ -878,15 +891,15 @@ app.post('/api/webhook/book-complete',
             <div style="text-align: center; margin-bottom: 30px;">
               <span style="font-size: 48px;">🎉</span>
             </div>
-            <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #ffffff; text-align: center;">Great News! Your Book is Ready</h2>
-            <p style="margin: 0 0 15px 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">Hi ${request.requester_name},</p>
-            <p style="margin: 0 0 20px 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">
+            <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Great News! Your Book is Ready</h2>
+            <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+            <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
               Your requested book "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} is now available in our library!
             </p>
             <div style="text-align: center; margin: 30px 0;">
               <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
             </div>
-            <p style="margin: 30px 0 0 0; font-size: 14px; color: rgba(255, 255, 255, 0.6); text-align: center;">Happy reading!<br><strong style="color: #ffffff;">JcubHub Books</strong></p>
+            <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b; text-align: center;">Happy reading!<br><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
           `;
           await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrapEmailHtml(webhookEmailContent, 'Your Book is Ready'));
         }
@@ -929,15 +942,15 @@ app.post('/api/admin/sync-cwa', authenticateToken, async (req, res) => {
           <div style="text-align: center; margin-bottom: 30px;">
             <span style="font-size: 48px;">🎉</span>
           </div>
-          <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #ffffff; text-align: center;">Great News! Your Book is Ready</h2>
-          <p style="margin: 0 0 15px 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">Hi ${request.requester_name},</p>
-          <p style="margin: 0 0 20px 0; font-size: 16px; color: rgba(255, 255, 255, 0.9);">
+          <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Great News! Your Book is Ready</h2>
+          <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+          <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
             Your requested book "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} is now available in our library!
           </p>
           <div style="text-align: center; margin: 30px 0;">
             <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
           </div>
-          <p style="margin: 30px 0 0 0; font-size: 14px; color: rgba(255, 255, 255, 0.6); text-align: center;">Happy reading!<br><strong style="color: #ffffff;">JcubHub Books</strong></p>
+          <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b; text-align: center;">Happy reading!<br><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
         `;
         await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrapEmailHtml(syncEmailContent, 'Your Book is Ready'));
       }
@@ -964,6 +977,26 @@ app.get('/admin/{*splat}', (req, res) => {
 // Fallback to index.html for SPA routing
 app.get('{*splat}', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// ============================================
+// Global Error Handler
+// ============================================
+
+app.use((err, req, res, next) => {
+  logger.error('Express error', { 
+    error: err.message, 
+    stack: err.stack,
+    path: req.path,
+    method: req.method,
+    requestId: req.requestId
+  });
+  
+  res.status(err.status || 500).json({ 
+    error: process.env.NODE_ENV === 'production' 
+      ? 'An unexpected error occurred' 
+      : err.message 
+  });
 });
 
 // ============================================

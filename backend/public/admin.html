@@ -455,7 +455,7 @@
   <div class="login-container" id="loginScreen">
     <div class="login-box">
       <h2 class="login-title">Admin Login</h2>
-      <form id="loginForm" onsubmit="handleLogin(event)">
+      <form id="loginForm">
         <div class="form-group">
           <label for="username">Username</label>
           <input type="text" id="username" name="username" required autocomplete="username">
@@ -477,9 +477,9 @@
       <h1 class="admin-title">JcubHub Books Admin</h1>
       <div class="admin-actions">
         <span class="admin-user" id="adminUsername"></span>
-        <button class="btn btn-secondary" onclick="syncCwa()">Sync CWA</button>
+        <button class="btn btn-secondary" id="syncCwaBtn">Sync CWA</button>
         <a href="/" class="btn btn-secondary">View Site</a>
-        <button class="btn btn-secondary" onclick="logout()">Logout</button>
+        <button class="btn btn-secondary" id="logoutBtn">Logout</button>
       </div>
     </header>
 
@@ -530,7 +530,7 @@
     <div class="modal-content">
       <div class="modal-header">
         <h3 class="modal-title">Request Details</h3>
-        <button class="modal-close" onclick="closeModal()">&times;</button>
+        <button class="modal-close" id="modalCloseBtn">&times;</button>
       </div>
       <div id="modalBody"></div>
     </div>
@@ -738,9 +738,9 @@
                   </td>
                   <td>${formatDate(req.created_at)}</td>
                   <td>
-                    <button class="action-btn" onclick="viewDetails('${req.id}')">View</button>
+                    <button class="action-btn" data-action="view" data-id="${req.id}">View</button>
                     ${req.readarr_url ? `<a href="${req.readarr_url}" target="_blank" class="action-btn">Readarr</a>` : ''}
-                    ${req.status === 'pending' ? `<button class="action-btn primary" onclick="addToReadarr('${req.id}')">Add</button>` : ''}
+                    ${req.status === 'pending' ? `<button class="action-btn primary" data-action="add-readarr" data-id="${req.id}">Add</button>` : ''}
                   </td>
                 </tr>
               `).join('')}
@@ -811,7 +811,7 @@
             <option value="unavailable" ${req.status === 'unavailable' ? 'selected' : ''}>Unavailable</option>
           </select>
           <textarea class="form-group" id="statusNotes" placeholder="Add a note (optional)" style="width: 100%; min-height: 80px; padding: 12px; background: var(--bg-input); border: 1px solid var(--border-medium); border-radius: var(--radius-md); color: var(--text-primary); margin-bottom: 15px;"></textarea>
-          <button class="btn btn-primary btn-full" onclick="updateStatus('${req.id}')">Update Status</button>
+          <button class="btn btn-primary btn-full" id="updateStatusBtn" data-id="${req.id}">Update Status</button>
 
           <div class="history-list">
             <h4 style="margin-bottom: 15px;">Status History</h4>
@@ -934,6 +934,32 @@
     // Close modal on backdrop click
     document.getElementById('detailModal').addEventListener('click', (e) => {
       if (e.target.classList.contains('modal')) closeModal();
+    });
+
+    // ============================================
+    // Event Listeners (CSP-compliant)
+    // ============================================
+
+    // Login form
+    document.getElementById('loginForm').addEventListener('submit', handleLogin);
+
+    // Header buttons
+    document.getElementById('syncCwaBtn').addEventListener('click', syncCwa);
+    document.getElementById('logoutBtn').addEventListener('click', logout);
+    document.getElementById('modalCloseBtn').addEventListener('click', closeModal);
+
+    // Event delegation for dynamic buttons
+    document.addEventListener('click', (e) => {
+      const target = e.target;
+      
+      // Handle action buttons in requests table
+      if (target.matches('[data-action="view"]')) {
+        viewDetails(target.dataset.id);
+      } else if (target.matches('[data-action="add-readarr"]')) {
+        addToReadarr(target.dataset.id);
+      } else if (target.matches('#updateStatusBtn')) {
+        updateStatus(target.dataset.id);
+      }
     });
   </script>
 </body>
