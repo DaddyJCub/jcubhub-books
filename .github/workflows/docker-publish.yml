@@ -1,0 +1,110 @@
+name: Build and Publish Docker Image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: 'backend/package-lock.json'
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: npm ci
+
+      - name: Run basic health check
+        working-directory: ./backend
+        run: |
+          # Start server in background
+          node server.js &
+          SERVER_PID=$!
+          
+          # Wait for server to be ready
+          echo "Waiting for server to start..."
+          sleep 5
+          
+          # Test health endpoint
+          curl -f http://localhost:3003/api/health || exit 1
+          
+          # Stop server
+          kill $SERVER_PID
+        env:
+          PORT: 3003
+          ADMIN_USERNAME: test-admin
+          ADMIN_PASSWORD: test-password
+          JWT_SECRET: test-jwt-secret-for-ci
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Tag with 'latest' for main branch
+            type=raw,value=latest,enable={{is_default_branch}}
+            # Tag with version for version tags (e.g., v1.2.3 -> 1.2.3)
+            type=semver,pattern={{version}}
+            # Tag with major.minor for version tags (e.g., v1.2.3 -> 1.2)
+            type=semver,pattern={{major}}.{{minor}}
+            # Tag with major for version tags (e.g., v1.2.3 -> 1)
+            type=semver,pattern={{major}}
+            # Tag with sha for commits
+            type=sha,prefix={{branch}}-
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+      - name: Image digest
+        run: echo "Image pushed with digest ${{ steps.meta.outputs.tags }}"
