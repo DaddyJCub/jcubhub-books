@@ -93,6 +93,21 @@
     </Variable>
     <Variable>
       <Value></Value>
+      <Name>READARR_QUALITY_PROFILE_ID</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>READARR_METADATA_PROFILE_ID</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>READARR_ROOT_FOLDER</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
       <Name>CWA_URL</Name>
       <Mode/>
     </Variable>
@@ -107,6 +122,16 @@
       <Mode/>
     </Variable>
     <Variable>
+      <Value>false</Value>
+      <Name>EREADER_SEND_ENABLED</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>EREADER_ALLOWED_DOMAINS</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
       <Value></Value>
       <Name>WEBHOOK_SECRET</Name>
       <Mode/>
@@ -114,6 +139,11 @@
     <Variable>
       <Value>false</Value>
       <Name>AUTO_ADD_READARR</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>false</Value>
+      <Name>AUTO_APPROVE</Name>
       <Mode/>
     </Variable>
     <Variable>
@@ -133,10 +163,16 @@
   <Config Name="Turnstile Secret" Target="TURNSTILE_SECRET_KEY" Default="" Mode="" Description="Cloudflare Turnstile secret key" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
   <Config Name="Readarr URL" Target="READARR_URL" Default="" Mode="" Description="Readarr/Chaptarr server URL (e.g., http://192.168.1.100:8787)" Type="Variable" Display="always" Required="false" Mask="false"></Config>
   <Config Name="Readarr API Key" Target="READARR_API_KEY" Default="" Mode="" Description="Readarr/Chaptarr API key" Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="Readarr Quality Profile ID" Target="READARR_QUALITY_PROFILE_ID" Default="" Mode="" Description="Optional default quality profile ID in Readarr/Chaptarr" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Readarr Metadata Profile ID" Target="READARR_METADATA_PROFILE_ID" Default="" Mode="" Description="Optional metadata profile ID in Readarr/Chaptarr" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Readarr Root Folder" Target="READARR_ROOT_FOLDER" Default="" Mode="" Description="Optional root folder override in Readarr/Chaptarr" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
   <Config Name="CWA URL" Target="CWA_URL" Default="" Mode="" Description="Calibre Web Automated URL" Type="Variable" Display="always" Required="false" Mask="false"></Config>
   <Config Name="CWA Username" Target="CWA_USERNAME" Default="" Mode="" Description="CWA username for OPDS access" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
   <Config Name="CWA Password" Target="CWA_PASSWORD" Default="" Mode="" Description="CWA password for OPDS access" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+  <Config Name="Enable Send to eReader" Target="EREADER_SEND_ENABLED" Default="false" Mode="" Description="Allow users to email CWA book links to eReader addresses (true/false)" Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
+  <Config Name="eReader Allowed Domains" Target="EREADER_ALLOWED_DOMAINS" Default="" Mode="" Description="Optional comma-separated domain allowlist for eReader emails (example: kindle.com,free.kindle.com)" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
   <Config Name="Webhook Secret" Target="WEBHOOK_SECRET" Default="" Mode="" Description="Secret for webhook verification (optional)" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+  <Config Name="Auto-Approve Requests" Target="AUTO_APPROVE" Default="false" Mode="" Description="Automatically approve new requests (true/false)" Type="Variable" Display="always" Required="false" Mask="false">false</Config>
   <Config Name="Auto-Add to Readarr" Target="AUTO_ADD_READARR" Default="false" Mode="" Description="Automatically add new requests to Readarr (true/false)" Type="Variable" Display="always" Required="false" Mask="false">false</Config>
   <Config Name="Auto-Sync Interval" Target="AUTO_SYNC_INTERVAL" Default="0" Mode="" Description="Minutes between automatic CWA sync checks (0 = disabled, e.g., 60 for hourly)" Type="Variable" Display="always" Required="false" Mask="false">0</Config>
 </Container>

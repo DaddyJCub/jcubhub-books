@@ -778,7 +778,10 @@
           html += '<div style="margin-bottom: 15px;"><strong>Currently Downloading:</strong></div>';
           html += '<div style="display: flex; flex-wrap: wrap; gap: 10px;">';
           for (const item of data.queue) {
-            const progress = item.sizeleft && item.size ? Math.round((1 - item.sizeleft / item.size) * 100) : 0;
+            const size = Number(item.size);
+            const sizeLeft = Number(item.sizeleft);
+            const hasSize = Number.isFinite(size) && Number.isFinite(sizeLeft) && size > 0;
+            const progress = hasSize ? Math.round((1 - sizeLeft / size) * 100) : 0;
             html += `
               <div style="background: rgba(102, 126, 234, 0.1); padding: 12px 16px; border-radius: 8px; flex: 1; min-width: 250px;">
                 <div style="font-weight: 600; margin-bottom: 5px;">${escapeHtml(item.title || 'Unknown')}</div>
@@ -1163,7 +1166,7 @@
           </div>
           <div class="detail-row">
             <span class="detail-label">Notes:</span>
-            <span class="detail-value">${req.notes || 'None'}</span>
+            <span class="detail-value">${req.notes ? escapeHtml(req.notes) : 'None'}</span>
           </div>
           <div class="detail-row">
             <span class="detail-label">Notify:</span>
@@ -1173,6 +1176,30 @@
             <span class="detail-label">CWA:</span>
             <span class="detail-value">${req.cwa_available ? 'Available' : 'Not found'}</span>
           </div>
+          ${req.readarr_book_id || req.readarr_foreign_book_id ? `
+          <div class="detail-row">
+            <span class="detail-label">Readarr:</span>
+            <span class="detail-value">Book ID: ${req.readarr_book_id || 'N/A'}${req.readarr_foreign_book_id ? ` | Foreign ID: ${escapeHtml(req.readarr_foreign_book_id)}` : ''}</span>
+          </div>
+          ` : ''}
+          ${req.readarr_selected_title ? `
+          <div class="detail-row">
+            <span class="detail-label">Tracked Match:</span>
+            <span class="detail-value">${escapeHtml(req.readarr_selected_title)}${req.readarr_selected_author ? ` by ${escapeHtml(req.readarr_selected_author)}` : ''}${req.readarr_selected_release_date ? ` (${escapeHtml(req.readarr_selected_release_date)})` : ''}</span>
+          </div>
+          ` : ''}
+          ${req.cwa_book_link ? `
+          <div class="detail-row">
+            <span class="detail-label">CWA Link:</span>
+            <span class="detail-value"><a href="${escapeHtml(req.cwa_book_link)}" target="_blank" rel="noopener noreferrer" style="color: #86efac;">Open Book</a></span>
+          </div>
+          ` : ''}
+          ${req.last_readarr_error ? `
+          <div class="detail-row">
+            <span class="detail-label">Last Error:</span>
+            <span class="detail-value" style="color: #ef4444;">${escapeHtml(req.last_readarr_error)}</span>
+          </div>
+          ` : ''}
 
           <hr style="border-color: var(--border-light); margin: 20px 0;">
 
@@ -1197,6 +1224,19 @@
           </div>
 
           <div class="history-list">
+            <h4 style="margin-bottom: 15px;">Subscribers (${req.subscribers?.length || 0})</h4>
+            ${(req.subscribers && req.subscribers.length > 0) ? req.subscribers.map(sub => `
+              <div class="history-item">
+                <span class="history-time">${formatDateTime(sub.created_at)}</span>
+                <span class="history-status">
+                  <span>${escapeHtml(sub.subscriber_name)} (${escapeHtml(sub.subscriber_email)})</span>
+                  ${sub.notify_on_complete ? '<span style="color: #22c55e; margin-left: 10px;">notify</span>' : '<span style="color: var(--text-muted); margin-left: 10px;">silent</span>'}
+                </span>
+              </div>
+            `).join('') : `<div class="history-item"><span class="history-status" style="color: var(--text-muted);">No subscribers</span></div>`}
+          </div>
+
+          <div class="history-list" style="margin-top: 20px;">
             <h4 style="margin-bottom: 15px;">Status History</h4>
             ${req.statusHistory.map(h => `
               <div class="history-item">
@@ -1253,7 +1293,7 @@
         const result = await response.json();
         
         if (result.success) {
-          showToast('Book added to Readarr', 'success');
+          showToast(result.alreadyTracked ? 'Request already tracked in Readarr' : 'Book added to Readarr', 'success');
           loadRequests();
           loadStats();
         } else {
@@ -1274,9 +1314,9 @@
         const response = await apiCall(`/api/admin/requests/${id}`, {
           method: 'PATCH',
           body: JSON.stringify({ 
-            status: 'searching', 
+            status: 'approved', 
             addToReadarr: true,
-            notes: 'Force added to Readarr (bypassed CWA check)'
+            notes: 'Force add requested by admin'
           })
         });
 

@@ -71,8 +71,17 @@ const automation = {
   autoApprove: process.env.AUTO_APPROVE === 'true'  // Auto-approve all requests
 };
 
+const ereader = {
+  enabled: process.env.EREADER_SEND_ENABLED === 'true',
+  allowedDomains: String(process.env.EREADER_ALLOWED_DOMAINS || '')
+    .split(',')
+    .map(v => v.trim().toLowerCase())
+    .filter(Boolean)
+};
+
 logger.info('Integrations Status:', integrations);
 logger.info('Automation Settings:', automation);
+logger.info('eReader Settings:', { enabled: ereader.enabled, allowedDomains: ereader.allowedDomains });
 
 // Initialize SQLite database
 // Use DATA_PATH env var if set (for Docker volume mounts), otherwise fallback to local data folder
@@ -110,7 +119,17 @@ function initDatabase() {
       status TEXT DEFAULT 'pending',
       notify_on_complete INTEGER DEFAULT 1,
       readarr_url TEXT,
+      readarr_book_id INTEGER,
+      readarr_author_id INTEGER,
+      readarr_foreign_book_id TEXT,
+      readarr_foreign_author_id TEXT,
+      readarr_selected_title TEXT,
+      readarr_selected_author TEXT,
+      readarr_selected_release_date TEXT,
+      last_readarr_error TEXT,
+      status_token TEXT,
       cwa_available INTEGER DEFAULT 0,
+      cwa_book_link TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -124,6 +143,16 @@ function initDatabase() {
       FOREIGN KEY (request_id) REFERENCES requests(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS request_subscribers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id TEXT NOT NULL,
+      subscriber_name TEXT NOT NULL,
+      subscriber_email TEXT NOT NULL,
+      notify_on_complete INTEGER DEFAULT 1,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (request_id) REFERENCES requests(id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS admin_users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE NOT NULL,
@@ -133,6 +162,12 @@ function initDatabase() {
 
     CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
     CREATE INDEX IF NOT EXISTS idx_requests_email ON requests(requester_email);
+    CREATE INDEX IF NOT EXISTS idx_requests_readarr_book_id ON requests(readarr_book_id);
+    CREATE INDEX IF NOT EXISTS idx_requests_readarr_foreign_book_id ON requests(readarr_foreign_book_id);
+    CREATE INDEX IF NOT EXISTS idx_requests_status_token ON requests(status_token);
+    CREATE INDEX IF NOT EXISTS idx_requests_cwa_book_link ON requests(cwa_book_link);
+    CREATE INDEX IF NOT EXISTS idx_request_subscribers_request_id ON request_subscribers(request_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_request_subscribers_unique_email ON request_subscribers(request_id, subscriber_email);
     CREATE INDEX IF NOT EXISTS idx_status_history_request ON status_history(request_id);
   `);
 
@@ -142,6 +177,41 @@ function initDatabase() {
     logger.info('Migration: Added ISBN column to requests table');
   } catch (e) {
     // Column already exists, ignore
+  }
+
+  const requestColumns = [
+    { name: 'readarr_book_id', sql: 'ALTER TABLE requests ADD COLUMN readarr_book_id INTEGER' },
+    { name: 'readarr_author_id', sql: 'ALTER TABLE requests ADD COLUMN readarr_author_id INTEGER' },
+    { name: 'readarr_foreign_book_id', sql: 'ALTER TABLE requests ADD COLUMN readarr_foreign_book_id TEXT' },
+    { name: 'readarr_foreign_author_id', sql: 'ALTER TABLE requests ADD COLUMN readarr_foreign_author_id TEXT' },
+    { name: 'readarr_selected_title', sql: 'ALTER TABLE requests ADD COLUMN readarr_selected_title TEXT' },
+    { name: 'readarr_selected_author', sql: 'ALTER TABLE requests ADD COLUMN readarr_selected_author TEXT' },
+    { name: 'readarr_selected_release_date', sql: 'ALTER TABLE requests ADD COLUMN readarr_selected_release_date TEXT' },
+    { name: 'last_readarr_error', sql: 'ALTER TABLE requests ADD COLUMN last_readarr_error TEXT' },
+    { name: 'status_token', sql: 'ALTER TABLE requests ADD COLUMN status_token TEXT' },
+    { name: 'cwa_book_link', sql: 'ALTER TABLE requests ADD COLUMN cwa_book_link TEXT' }
+  ];
+
+  for (const column of requestColumns) {
+    try {
+      db.exec(column.sql);
+      logger.info('Migration: Added column to requests table', { column: column.name });
+    } catch (e) {
+      // Column already exists, ignore
+    }
+  }
+
+  // Strong dedupe locks: prevent multiple requests from tracking the same Readarr book IDs.
+  // If historical duplicates exist these may fail; we keep startup running and log the issue.
+  try {
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS uq_requests_readarr_book_id ON requests(readarr_book_id) WHERE readarr_book_id IS NOT NULL');
+  } catch (e) {
+    logger.warn('Could not enforce unique index uq_requests_readarr_book_id', { error: e.message });
+  }
+  try {
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS uq_requests_readarr_foreign_book_id ON requests(readarr_foreign_book_id) WHERE readarr_foreign_book_id IS NOT NULL');
+  } catch (e) {
+    logger.warn('Could not enforce unique index uq_requests_readarr_foreign_book_id', { error: e.message });
   }
 
   // Create default admin if not exists
@@ -267,6 +337,86 @@ function generateId() {
   return `BR-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 }
 
+function generateStatusToken() {
+  return crypto.randomBytes(16).toString('hex');
+}
+
+const READARR_HTTP_TIMEOUT_MS = parseInt(process.env.READARR_HTTP_TIMEOUT_MS, 10) || 12000;
+const READARR_HTTP_RETRIES = parseInt(process.env.READARR_HTTP_RETRIES, 10) || 1;
+const READARR_CACHE_TTL_MS = parseInt(process.env.READARR_CACHE_TTL_MS, 10) || 5 * 60 * 1000;
+
+const readarrConfigCache = {
+  qualityProfiles: null,
+  metadataProfiles: null,
+  rootFolders: null,
+  fetchedAt: 0
+};
+
+function escapeHtml(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function parsePositiveInt(value) {
+  const parsed = parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function matchesByForeignId(record, foreignBookId, foreignAuthorId) {
+  const recordBook = String(record.readarr_foreign_book_id || '').trim();
+  const recordAuthor = String(record.readarr_foreign_author_id || '').trim();
+  const payloadBook = String(foreignBookId || '').trim();
+  const payloadAuthor = String(foreignAuthorId || '').trim();
+
+  if (recordBook && payloadBook) {
+    return recordBook === payloadBook;
+  }
+
+  if (recordAuthor && payloadAuthor) {
+    return recordAuthor === payloadAuthor;
+  }
+
+  return false;
+}
+
+async function fetchWithTimeout(url, options = {}, label = 'HTTP request') {
+  let lastError;
+
+  for (let attempt = 0; attempt <= READARR_HTTP_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), READARR_HTTP_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal
+      });
+
+      if (response.status >= 500 && attempt < READARR_HTTP_RETRIES) {
+        logger.warn(`${label} failed, retrying`, { url, status: response.status, attempt: attempt + 1 });
+        continue;
+      }
+
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (attempt < READARR_HTTP_RETRIES) {
+        logger.warn(`${label} error, retrying`, { url, attempt: attempt + 1, error: error.message });
+        continue;
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  throw lastError || new Error(`${label} failed`);
+}
+
 async function verifyTurnstile(token) {
   if (!process.env.TURNSTILE_SECRET_KEY) {
     logger.warn('TURNSTILE_SECRET_KEY not configured, skipping verification');
@@ -373,6 +523,74 @@ function generateReadarrUrl(author, bookTitle, isbn) {
   return `${process.env.READARR_URL}/add/search?term=${searchQuery}`;
 }
 
+function buildCwaSearchLink(bookTitle) {
+  if (!process.env.CWA_URL) return null;
+  return `${process.env.CWA_URL}/search?query=${encodeURIComponent(bookTitle)}`;
+}
+
+function normalizeForMatch(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseCwaOpdsEntries(xml) {
+  const entries = [];
+  const entryRegex = /<entry\b[\s\S]*?<\/entry>/gi;
+  let match;
+
+  while ((match = entryRegex.exec(xml)) !== null) {
+    const block = match[0];
+    const title = (block.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '')
+      .replace(/<[^>]+>/g, '')
+      .trim();
+    const author = (block.match(/<author>[\s\S]*?<name[^>]*>([\s\S]*?)<\/name>[\s\S]*?<\/author>/i)?.[1] || '')
+      .replace(/<[^>]+>/g, '')
+      .trim();
+    const bookHref = block.match(/<link[^>]+href="([^"]*\/book\/\d+[^"]*)"[^>]*>/i)?.[1] || null;
+    const fallbackHref = block.match(/<link[^>]+href="([^"]+)"[^>]*>/i)?.[1] || null;
+
+    entries.push({
+      title,
+      author,
+      bookHref: bookHref || fallbackHref
+    });
+  }
+
+  return entries;
+}
+
+function chooseBestCwaEntry(entries, bookTitle, author) {
+  if (!entries.length) return null;
+
+  const targetTitle = normalizeForMatch(bookTitle);
+  const targetAuthor = normalizeForMatch(author);
+
+  const scored = entries.map(entry => {
+    const entryTitle = normalizeForMatch(entry.title);
+    const entryAuthor = normalizeForMatch(entry.author);
+    let score = 0;
+
+    if (entryTitle && targetTitle) {
+      if (entryTitle === targetTitle) score += 100;
+      else if (entryTitle.startsWith(targetTitle)) score += 50;
+      else if (entryTitle.includes(targetTitle) || targetTitle.includes(entryTitle)) score += 25;
+    }
+
+    if (entryAuthor && targetAuthor) {
+      if (entryAuthor === targetAuthor) score += 40;
+      else if (entryAuthor.includes(targetAuthor) || targetAuthor.includes(entryAuthor)) score += 20;
+    }
+
+    return { entry, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0].score > 0 ? scored[0].entry : null;
+}
+
 async function checkCwaAvailability(bookTitle, author) {
   if (!process.env.CWA_URL || !process.env.CWA_USERNAME || !process.env.CWA_PASSWORD) {
     return { available: false };
@@ -380,36 +598,44 @@ async function checkCwaAvailability(bookTitle, author) {
 
   try {
     const credentials = Buffer.from(`${process.env.CWA_USERNAME}:${process.env.CWA_PASSWORD}`).toString('base64');
-    const response = await fetch(`${process.env.CWA_URL}/opds/search?query=${encodeURIComponent(bookTitle)}`, {
+    const response = await fetchWithTimeout(`${process.env.CWA_URL}/opds/search?query=${encodeURIComponent(bookTitle)}`, {
       headers: {
         'Authorization': `Basic ${credentials}`
       }
-    });
+    }, 'CWA availability check');
 
     if (!response.ok) return { available: false };
 
     const xml = await response.text();
-    // Simple check for entries - a proper implementation would parse the OPDS XML
-    const found = xml.includes('<entry>') && xml.toLowerCase().includes(author.toLowerCase());
-    
-    // Try to extract book ID from OPDS response for direct link
-    let bookLink = null;
-    if (found) {
-      // Look for the book detail link in OPDS - usually in <id> or <link> tags
-      const idMatch = xml.match(/<id>urn:uuid:([^<]+)<\/id>/);
-      const linkMatch = xml.match(/href="\/book\/(\d+)/);
-      if (linkMatch) {
-        bookLink = `${process.env.CWA_URL}/book/${linkMatch[1]}`;
-      } else if (idMatch) {
-        // Fallback to search page
-        bookLink = `${process.env.CWA_URL}/search?query=${encodeURIComponent(bookTitle)}`;
-      } else {
-        bookLink = `${process.env.CWA_URL}/search?query=${encodeURIComponent(bookTitle)}`;
-      }
-    }
-    
-    logger.debug('CWA availability check', { bookTitle, author, found, bookLink });
-    return { available: found, bookLink };
+    const entries = parseCwaOpdsEntries(xml);
+    const bestEntry = chooseBestCwaEntry(entries, bookTitle, author);
+
+    const normalizeLink = rawLink => {
+      if (!rawLink) return null;
+      if (rawLink.startsWith('http://') || rawLink.startsWith('https://')) return rawLink;
+      if (rawLink.startsWith('/')) return `${process.env.CWA_URL}${rawLink}`;
+      return `${process.env.CWA_URL}/${rawLink}`;
+    };
+
+    const bookLink = normalizeLink(bestEntry?.bookHref) || buildCwaSearchLink(bookTitle);
+    const found = !!bestEntry;
+
+    logger.debug('CWA availability check', {
+      bookTitle,
+      author,
+      found,
+      entryCount: entries.length,
+      matchedTitle: bestEntry?.title || null,
+      matchedAuthor: bestEntry?.author || null,
+      bookLink
+    });
+
+    return {
+      available: found,
+      bookLink,
+      matchedTitle: bestEntry?.title || null,
+      matchedAuthor: bestEntry?.author || null
+    };
   } catch (error) {
     logger.error('CWA availability check error', { bookTitle, error: error.message });
     return { available: false };
@@ -428,11 +654,11 @@ async function searchReadarr(bookTitle, author, isbn) {
     
     logger.info('Readarr search', { searchQuery: rawQuery, usingIsbn: !!isbn });
     
-    const response = await fetch(`${process.env.READARR_URL}/api/v1/book/lookup?term=${searchQuery}`, {
+    const response = await fetchWithTimeout(`${process.env.READARR_URL}/api/v1/book/lookup?term=${searchQuery}`, {
       headers: {
         'X-Api-Key': process.env.READARR_API_KEY
       }
-    });
+    }, 'Readarr search');
 
     if (!response.ok) {
       logger.warn('Readarr search failed', { status: response.status });
@@ -489,8 +715,9 @@ async function searchReadarr(bookTitle, author, isbn) {
       }
       
       // Author match
-      if (bookAuthorLower.includes(normalizedSearchAuthor) || 
-          normalizedSearchAuthor.includes(bookAuthorLower)) {
+      if (normalizedSearchAuthor &&
+          (bookAuthorLower.includes(normalizedSearchAuthor) ||
+          normalizedSearchAuthor.includes(bookAuthorLower))) {
         score += 20;
       }
       
@@ -515,6 +742,304 @@ async function searchReadarr(bookTitle, author, isbn) {
   }
 }
 
+function getRequestSubscribers(requestId) {
+  return db.prepare(`
+    SELECT id, request_id, subscriber_name, subscriber_email, notify_on_complete, created_at
+    FROM request_subscribers
+    WHERE request_id = ?
+    ORDER BY created_at ASC
+  `).all(requestId);
+}
+
+function addSubscriberToRequest(requestId, subscriberName, subscriberEmail, notifyOnComplete = true) {
+  const now = new Date().toISOString();
+  const name = (subscriberName || '').trim() || 'Subscriber';
+  db.prepare(`
+    INSERT OR IGNORE INTO request_subscribers
+      (request_id, subscriber_name, subscriber_email, notify_on_complete, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(
+    requestId,
+    name,
+    subscriberEmail,
+    notifyOnComplete ? 1 : 0,
+    now
+  );
+}
+
+async function notifySubscribers(request, subject, html, options = {}) {
+  const subscribers = getRequestSubscribers(request.id);
+  if (subscribers.length === 0) return;
+
+  const exclude = new Set(
+    (options.excludeEmails || []).map(email => String(email || '').toLowerCase().trim())
+  );
+
+  for (const sub of subscribers) {
+    if (!sub.notify_on_complete) continue;
+    const normalized = String(sub.subscriber_email || '').toLowerCase().trim();
+    if (!normalized || exclude.has(normalized)) continue;
+    await sendEmail(sub.subscriber_email, subject, html);
+  }
+}
+
+function findPublicRequest(requestId, email, statusToken) {
+  let request = null;
+
+  if (statusToken) {
+    request = db.prepare('SELECT * FROM requests WHERE status_token = ?').get(statusToken);
+    if (!request) return null;
+
+    if (!email) return request;
+
+    const requesterMatch = String(request.requester_email || '').toLowerCase() === String(email || '').toLowerCase();
+    if (requesterMatch) return request;
+
+    const subMatch = db.prepare(`
+      SELECT 1
+      FROM request_subscribers
+      WHERE request_id = ?
+      AND LOWER(subscriber_email) = LOWER(?)
+      LIMIT 1
+    `).get(request.id, email);
+    return subMatch ? request : null;
+  }
+
+  if (!requestId || !email) return null;
+
+  request = db.prepare(`
+    SELECT * FROM requests
+    WHERE id = ?
+    AND LOWER(requester_email) = LOWER(?)
+  `).get(requestId, email);
+  if (request) return request;
+
+  return db.prepare(`
+    SELECT r.*
+    FROM requests r
+    JOIN request_subscribers s ON s.request_id = r.id
+    WHERE r.id = ?
+    AND LOWER(s.subscriber_email) = LOWER(?)
+    LIMIT 1
+  `).get(requestId, email);
+}
+
+function updateRequestCwaState(requestId, now, available, cwaBookLink = null) {
+  db.prepare(`
+    UPDATE requests
+    SET cwa_available = ?,
+        cwa_book_link = COALESCE(?, cwa_book_link),
+        updated_at = ?
+    WHERE id = ?
+  `).run(available ? 1 : 0, cwaBookLink || null, now, requestId);
+}
+
+async function resolveCwaLinkForRequest(request, cwaCheck = null) {
+  if (cwaCheck?.bookLink) {
+    return cwaCheck.bookLink;
+  }
+  if (request?.cwa_book_link) {
+    return request.cwa_book_link;
+  }
+  if (!integrations.cwa) {
+    return buildCwaSearchLink(request?.book_title || '');
+  }
+
+  const resolved = await checkCwaAvailability(request.book_title, request.author);
+  if (resolved.available && resolved.bookLink) {
+    return resolved.bookLink;
+  }
+
+  return buildCwaSearchLink(request.book_title);
+}
+
+function findTrackedRequestConflict(currentRequestId, identifiers = {}) {
+  const readarrBookId = parsePositiveInt(identifiers.readarrBookId);
+  const foreignBookId = String(identifiers.foreignBookId || '').trim();
+
+  if (!readarrBookId && !foreignBookId) return null;
+
+  return db.prepare(`
+    SELECT id, status, book_title, author, readarr_book_id, readarr_foreign_book_id
+    FROM requests
+    WHERE id != ?
+    AND status NOT IN ('rejected', 'unavailable')
+    AND (
+      (? IS NOT NULL AND readarr_book_id = ?)
+      OR
+      (? != '' AND readarr_foreign_book_id = ?)
+    )
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `).get(
+    currentRequestId || '',
+    readarrBookId,
+    readarrBookId,
+    foreignBookId,
+    foreignBookId
+  );
+}
+
+async function notifyAdminLifecycle(eventType, request, details = {}) {
+  if (!process.env.ADMIN_EMAIL) return;
+  if (!request || !request.id) return;
+
+  const safeBookTitle = escapeHtml(request.book_title);
+  const safeAuthor = escapeHtml(request.author);
+  const safeRequestId = escapeHtml(request.id);
+  const safeDetails = escapeHtml(details.message || '');
+  const cwaLink = details.cwaLink || request.cwa_book_link || buildCwaSearchLink(request.book_title) || '';
+
+  let subject = '';
+  let title = '';
+  let content = '';
+
+  if (eventType === 'completed') {
+    subject = `Request Completed: ${request.id} - JcubHub Books`;
+    title = 'Request Completed';
+    content = `
+      <h2 style="margin: 0 0 16px 0;">Request Completed</h2>
+      <p style="margin: 0 0 8px 0;"><strong>ID:</strong> ${safeRequestId}</p>
+      <p style="margin: 0 0 8px 0;"><strong>Book:</strong> ${safeBookTitle} by ${safeAuthor}</p>
+      <p style="margin: 0 0 8px 0;"><strong>Requester:</strong> ${escapeHtml(request.requester_name)} (${escapeHtml(request.requester_email)})</p>
+      ${cwaLink ? `<p style="margin: 16px 0 0 0;"><a href="${cwaLink}" style="color:#667eea;">Open in CWA</a></p>` : ''}
+    `;
+  } else if (eventType === 'readarr_failed') {
+    subject = `Readarr Failure: ${request.id} - JcubHub Books`;
+    title = 'Readarr Failure';
+    content = `
+      <h2 style="margin: 0 0 16px 0;">Readarr Add Failed</h2>
+      <p style="margin: 0 0 8px 0;"><strong>ID:</strong> ${safeRequestId}</p>
+      <p style="margin: 0 0 8px 0;"><strong>Book:</strong> ${safeBookTitle} by ${safeAuthor}</p>
+      <p style="margin: 0 0 8px 0;"><strong>Error:</strong> ${safeDetails || 'Unknown error'}</p>
+      <p style="margin: 0 0 8px 0;"><strong>Status:</strong> ${escapeHtml(request.status || 'unknown')}</p>
+    `;
+  } else if (eventType === 'mismatch_reported') {
+    subject = `Potential Match Mismatch: ${request.id} - JcubHub Books`;
+    title = 'Match Mismatch Reported';
+    content = `
+      <h2 style="margin: 0 0 16px 0;">User Reported Wrong Match</h2>
+      <p style="margin: 0 0 8px 0;"><strong>ID:</strong> ${safeRequestId}</p>
+      <p style="margin: 0 0 8px 0;"><strong>Book:</strong> ${safeBookTitle} by ${safeAuthor}</p>
+      <p style="margin: 0 0 8px 0;"><strong>Reporter:</strong> ${escapeHtml(details.reporterEmail || request.requester_email || '')}</p>
+      ${safeDetails ? `<p style="margin: 0 0 8px 0;"><strong>Notes:</strong> ${safeDetails}</p>` : ''}
+    `;
+  } else {
+    return;
+  }
+
+  await sendEmail(process.env.ADMIN_EMAIL, subject, wrapEmailHtml(content, title));
+}
+
+async function getReadarrConfig(forceRefresh = false) {
+  const now = Date.now();
+  const cacheValid = !forceRefresh &&
+    readarrConfigCache.fetchedAt > 0 &&
+    (now - readarrConfigCache.fetchedAt) < READARR_CACHE_TTL_MS &&
+    readarrConfigCache.qualityProfiles &&
+    readarrConfigCache.metadataProfiles &&
+    readarrConfigCache.rootFolders;
+
+  if (cacheValid) {
+    return readarrConfigCache;
+  }
+
+  const headers = { 'X-Api-Key': process.env.READARR_API_KEY };
+  const [profilesResponse, metadataResponse, rootFolderResponse] = await Promise.all([
+    fetchWithTimeout(`${process.env.READARR_URL}/api/v1/qualityprofile`, { headers }, 'Readarr quality profiles'),
+    fetchWithTimeout(`${process.env.READARR_URL}/api/v1/metadataprofile`, { headers }, 'Readarr metadata profiles'),
+    fetchWithTimeout(`${process.env.READARR_URL}/api/v1/rootfolder`, { headers }, 'Readarr root folders')
+  ]);
+
+  if (!profilesResponse.ok) {
+    throw new Error(`Failed to fetch quality profiles from Readarr (HTTP ${profilesResponse.status})`);
+  }
+  if (!metadataResponse.ok) {
+    throw new Error(`Failed to fetch metadata profiles from Readarr (HTTP ${metadataResponse.status})`);
+  }
+  if (!rootFolderResponse.ok) {
+    throw new Error(`Failed to fetch root folders from Readarr (HTTP ${rootFolderResponse.status})`);
+  }
+
+  const qualityProfiles = await profilesResponse.json();
+  const metadataProfiles = await metadataResponse.json();
+  const rootFolders = await rootFolderResponse.json();
+
+  if (!qualityProfiles.length) throw new Error('No quality profiles configured in Readarr');
+  if (!metadataProfiles.length) throw new Error('No metadata profiles configured in Readarr');
+  if (!rootFolders.length) throw new Error('No root folders configured in Readarr');
+
+  readarrConfigCache.qualityProfiles = qualityProfiles;
+  readarrConfigCache.metadataProfiles = metadataProfiles;
+  readarrConfigCache.rootFolders = rootFolders;
+  readarrConfigCache.fetchedAt = now;
+
+  logger.info('Readarr configuration cached', {
+    qualityProfiles: qualityProfiles.length,
+    metadataProfiles: metadataProfiles.length,
+    rootFolders: rootFolders.length
+  });
+
+  return readarrConfigCache;
+}
+
+function selectQualityProfileId(format, profiles) {
+  const requestedFormat = String(format || 'any').toLowerCase();
+  const formatEnvMap = {
+    epub: process.env.READARR_QUALITY_PROFILE_ID_EPUB,
+    pdf: process.env.READARR_QUALITY_PROFILE_ID_PDF,
+    mobi: process.env.READARR_QUALITY_PROFILE_ID_MOBI,
+    audiobook: process.env.READARR_QUALITY_PROFILE_ID_AUDIOBOOK,
+    any: process.env.READARR_QUALITY_PROFILE_ID
+  };
+
+  const requestedId = parsePositiveInt(formatEnvMap[requestedFormat]) || parsePositiveInt(process.env.READARR_QUALITY_PROFILE_ID);
+  if (requestedId && profiles.some(p => p.id === requestedId)) {
+    return requestedId;
+  }
+
+  if (requestedId) {
+    logger.warn('Configured quality profile not found, using first profile', { requestedId, format: requestedFormat });
+  }
+
+  return profiles[0].id;
+}
+
+function selectMetadataProfileId(profiles) {
+  const requestedId = parsePositiveInt(process.env.READARR_METADATA_PROFILE_ID);
+  if (requestedId && profiles.some(p => p.id === requestedId)) {
+    return requestedId;
+  }
+
+  if (requestedId) {
+    logger.warn('Configured metadata profile not found, using first profile', { requestedId });
+  }
+
+  return profiles[0].id;
+}
+
+function selectRootFolderPath(format, rootFolders) {
+  const requestedFormat = String(format || 'any').toLowerCase();
+  const formatEnvMap = {
+    epub: process.env.READARR_ROOT_FOLDER_EPUB,
+    pdf: process.env.READARR_ROOT_FOLDER_PDF,
+    mobi: process.env.READARR_ROOT_FOLDER_MOBI,
+    audiobook: process.env.READARR_ROOT_FOLDER_AUDIOBOOK,
+    any: process.env.READARR_ROOT_FOLDER
+  };
+
+  const requestedPath = formatEnvMap[requestedFormat] || process.env.READARR_ROOT_FOLDER;
+  if (requestedPath && rootFolders.some(r => r.path === requestedPath)) {
+    return requestedPath;
+  }
+
+  if (requestedPath) {
+    logger.warn('Configured root folder not found, using first root folder', { requestedPath, format: requestedFormat });
+  }
+
+  return rootFolders[0].path;
+}
+
 async function addBookToReadarr(bookData) {
   if (!process.env.READARR_URL || !process.env.READARR_API_KEY) {
     return { success: false, error: 'Readarr not configured' };
@@ -527,6 +1052,26 @@ async function addBookToReadarr(bookData) {
       return { success: false, error: 'Book not found in Readarr' };
     }
     
+    const selectedBook = {
+      title: searchResult.title || bookData.bookTitle || '',
+      author: searchResult.author?.authorName || searchResult.authorName || bookData.author || '',
+      releaseDate: searchResult.releaseDate || null,
+      foreignBookId: searchResult.foreignBookId || null
+    };
+
+    const preflightConflict = findTrackedRequestConflict(bookData.requestId, {
+      readarrBookId: parsePositiveInt(searchResult.id),
+      foreignBookId: selectedBook.foreignBookId
+    });
+    if (preflightConflict) {
+      return {
+        success: false,
+        duplicateDetected: true,
+        duplicateOfRequestId: preflightConflict.id,
+        error: `Book is already tracked by request ${preflightConflict.id}`
+      };
+    }
+
     // Debug: Log the structure of the search result
     logger.info('Readarr search result structure', {
       hasAuthor: !!searchResult.author,
@@ -538,46 +1083,13 @@ async function addBookToReadarr(bookData) {
       editions: searchResult.editions?.length || 0
     });
 
-    // Get quality profiles
-    const profilesResponse = await fetch(`${process.env.READARR_URL}/api/v1/qualityprofile`, {
-      headers: { 'X-Api-Key': process.env.READARR_API_KEY }
-    });
-    if (!profilesResponse.ok) {
-      return { success: false, error: 'Failed to fetch quality profiles from Readarr' };
-    }
-    const profiles = await profilesResponse.json();
-    if (!profiles.length) {
-      return { success: false, error: 'No quality profiles configured in Readarr' };
-    }
+    const { qualityProfiles, metadataProfiles, rootFolders } = await getReadarrConfig();
 
-    // Get metadata profiles
-    const metadataResponse = await fetch(`${process.env.READARR_URL}/api/v1/metadataprofile`, {
-      headers: { 'X-Api-Key': process.env.READARR_API_KEY }
-    });
-    if (!metadataResponse.ok) {
-      return { success: false, error: 'Failed to fetch metadata profiles from Readarr' };
-    }
-    const metadataProfiles = await metadataResponse.json();
-    if (!metadataProfiles.length) {
-      return { success: false, error: 'No metadata profiles configured in Readarr' };
-    }
-
-    // Get root folders
-    const rootFolderResponse = await fetch(`${process.env.READARR_URL}/api/v1/rootfolder`, {
-      headers: { 'X-Api-Key': process.env.READARR_API_KEY }
-    });
-    if (!rootFolderResponse.ok) {
-      return { success: false, error: 'Failed to fetch root folders from Readarr' };
-    }
-    const rootFolders = await rootFolderResponse.json();
-    if (!rootFolders.length) {
-      return { success: false, error: 'No root folders configured in Readarr' };
-    }
-
-    // Use first profile and root folder (or allow override via env)
-    const qualityProfileId = parseInt(process.env.READARR_QUALITY_PROFILE_ID) || profiles[0].id;
-    const metadataProfileId = parseInt(process.env.READARR_METADATA_PROFILE_ID) || metadataProfiles[0].id;
-    const rootFolderPath = process.env.READARR_ROOT_FOLDER || rootFolders[0].path;
+    const qualityProfileId = selectQualityProfileId(bookData.format, qualityProfiles);
+    const metadataProfileId = selectMetadataProfileId(metadataProfiles);
+    const rootFolderPath = selectRootFolderPath(bookData.format, rootFolders);
+    
+    logger.info('Using Readarr settings', { qualityProfileId, metadataProfileId, rootFolderPath });
 
     logger.info('Adding book to Readarr', {
       bookTitle: bookData.bookTitle,
@@ -588,90 +1100,37 @@ async function addBookToReadarr(bookData) {
       authorName: searchResult.author?.authorName || searchResult.authorName
     });
 
-    // Check if author already exists in Readarr
-    let authorId = searchResult.author?.id;
-    const foreignAuthorId = searchResult.author?.foreignAuthorId;
-    
-    if (!authorId && foreignAuthorId) {
-      // Search for existing author by foreignAuthorId
-      try {
-        const existingAuthorsResponse = await fetch(`${process.env.READARR_URL}/api/v1/author`, {
-          headers: { 'X-Api-Key': process.env.READARR_API_KEY }
-        });
-        if (existingAuthorsResponse.ok) {
-          const existingAuthors = await existingAuthorsResponse.json();
-          const existingAuthor = existingAuthors.find(a => a.foreignAuthorId === foreignAuthorId);
-          if (existingAuthor) {
-            authorId = existingAuthor.id;
-            logger.info('Found existing author in Readarr', { authorId, authorName: existingAuthor.authorName });
-          }
-        }
-      } catch (e) {
-        logger.warn('Error checking for existing author', { error: e.message });
-      }
-    }
-    
-    if (!authorId && searchResult.author) {
-      // Need to add author first
-      const authorToAdd = {
-        ...searchResult.author,
-        qualityProfileId: qualityProfileId,
-        metadataProfileId: metadataProfileId,
-        rootFolderPath: rootFolderPath,
-        path: `${rootFolderPath}/${searchResult.author.authorName || 'Unknown'}`,
-        monitored: true,
-        addOptions: {
-          monitor: 'all',
-          searchForMissingBooks: false
-        }
-      };
-      
-      logger.info('Adding author to Readarr first', { authorName: searchResult.author.authorName, path: authorToAdd.path });
-      
-      const authorResponse = await fetch(`${process.env.READARR_URL}/api/v1/author`, {
-        method: 'POST',
-        headers: {
-          'X-Api-Key': process.env.READARR_API_KEY,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(authorToAdd)
-      });
-      
-      if (authorResponse.ok) {
-        const addedAuthor = await authorResponse.json();
-        authorId = addedAuthor.id;
-        logger.info('Author added to Readarr', { authorId, authorName: addedAuthor.authorName });
-      } else {
-        const authorError = await authorResponse.text();
-        logger.warn('Author add failed', { status: authorResponse.status, error: authorError });
-        // Try to parse and see if it's because author exists
-      }
-    }
+    const authorId = searchResult.author?.id || 0;
 
-    // Build the book object
+    // Build the book object - include full author object so Readarr can create it
+    const safeAuthorFolder = (searchResult.author?.authorName || searchResult.authorName || 'Unknown')
+      .replace(/[\\/:*?"<>|]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const authorForBook = searchResult.author ? {
+      ...searchResult.author,
+      qualityProfileId: qualityProfileId,
+      metadataProfileId: metadataProfileId,
+      rootFolderPath: rootFolderPath,
+      path: `${rootFolderPath}/${safeAuthorFolder}`,
+      monitored: true
+    } : null;
+
     const bookToAdd = {
       ...searchResult,
       qualityProfileId: qualityProfileId,
       metadataProfileId: metadataProfileId,
       rootFolderPath: rootFolderPath,
-      authorId: authorId || searchResult.author?.id || 0,
+      author: authorForBook,
+      authorId: authorId || 0,
       monitored: true,
       addOptions: {
         monitor: 'all',
-        searchForNewBook: true
+        searchForNewBook: true,
+        addNewAuthor: true  // Tell Readarr to add the author if needed
       }
     };
-    
-    // Ensure author has profiles set
-    if (bookToAdd.author) {
-      bookToAdd.author.qualityProfileId = qualityProfileId;
-      bookToAdd.author.metadataProfileId = metadataProfileId;
-      bookToAdd.author.rootFolderPath = rootFolderPath;
-      bookToAdd.author.path = `${rootFolderPath}/${bookToAdd.author.authorName || 'Unknown'}`;
-      if (authorId) {
-        bookToAdd.author.id = authorId;
-      }
-    }
 
     // Debug: Log key fields of bookToAdd
     logger.info('Readarr book payload', {
@@ -680,6 +1139,7 @@ async function addBookToReadarr(bookData) {
       authorId: bookToAdd.authorId,
       authorName: bookToAdd.author?.authorName,
       authorForeignId: bookToAdd.author?.foreignAuthorId,
+      authorQualityProfile: bookToAdd.author?.qualityProfileId,
       qualityProfileId: bookToAdd.qualityProfileId,
       metadataProfileId: bookToAdd.metadataProfileId,
       rootFolderPath: bookToAdd.rootFolderPath,
@@ -689,14 +1149,14 @@ async function addBookToReadarr(bookData) {
     });
 
     // Add the book to Readarr
-    const response = await fetch(`${process.env.READARR_URL}/api/v1/book`, {
+    const response = await fetchWithTimeout(`${process.env.READARR_URL}/api/v1/book`, {
       method: 'POST',
       headers: {
         'X-Api-Key': process.env.READARR_API_KEY,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(bookToAdd)
-    });
+    }, 'Readarr add book');
 
     if (response.ok) {
       const data = await response.json();
@@ -709,30 +1169,41 @@ async function addBookToReadarr(bookData) {
         authorMonitored: data.author?.monitored
       });
       
-      // Trigger a search for the book
-      try {
-        const searchCommand = {
-          name: 'BookSearch',
-          bookIds: [data.id]
-        };
-        const searchResponse = await fetch(`${process.env.READARR_URL}/api/v1/command`, {
-          method: 'POST',
-          headers: {
-            'X-Api-Key': process.env.READARR_API_KEY,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(searchCommand)
-        });
-        if (searchResponse.ok) {
-          logger.info('Book search triggered in Readarr', { bookId: data.id });
-        } else {
-          logger.warn('Failed to trigger book search', { status: searchResponse.status });
+      if (process.env.READARR_FORCE_COMMAND_SEARCH === 'true') {
+        try {
+          const searchCommand = {
+            name: 'BookSearch',
+            bookIds: [data.id]
+          };
+          const searchResponse = await fetchWithTimeout(`${process.env.READARR_URL}/api/v1/command`, {
+            method: 'POST',
+            headers: {
+              'X-Api-Key': process.env.READARR_API_KEY,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(searchCommand)
+          }, 'Readarr command search');
+          if (searchResponse.ok) {
+            logger.info('Book search triggered in Readarr', { bookId: data.id });
+          } else {
+            logger.warn('Failed to trigger book search', { status: searchResponse.status });
+          }
+        } catch (searchError) {
+          logger.warn('Error triggering book search', { error: searchError.message });
         }
-      } catch (searchError) {
-        logger.warn('Error triggering book search', { error: searchError.message });
       }
       
-      return { success: true, data };
+      return {
+        success: true,
+        data,
+        identifiers: {
+          readarrBookId: data.id || null,
+          readarrAuthorId: data.authorId || data.author?.id || searchResult.author?.id || null,
+          foreignBookId: data.foreignBookId || searchResult.foreignBookId || null,
+          foreignAuthorId: data.author?.foreignAuthorId || searchResult.author?.foreignAuthorId || null
+        },
+        selectedBook
+      };
     } else {
       const errorText = await response.text();
       let errorMessage = 'Failed to add book';
@@ -747,12 +1218,81 @@ async function addBookToReadarr(bookData) {
         status: response.status,
         error: errorMessage 
       });
-      return { success: false, error: errorMessage };
+      return { success: false, error: errorMessage, statusCode: response.status };
     }
   } catch (error) {
     logger.error('Readarr add book error', { error: error.message });
     return { success: false, error: error.message };
   }
+}
+
+function setRequestStatus(requestId, status, now, notes = '') {
+  db.prepare('UPDATE requests SET status = ?, updated_at = ? WHERE id = ?').run(status, now, requestId);
+  db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
+    requestId,
+    status,
+    now,
+    notes
+  );
+}
+
+function persistReadarrResult(requestId, readarrResult, now) {
+  if (readarrResult?.success) {
+    const conflict = findTrackedRequestConflict(requestId, readarrResult.identifiers || {});
+    if (conflict) {
+      const conflictMessage = `Duplicate Readarr tracking blocked: already tracked by request ${conflict.id}`;
+      db.prepare('UPDATE requests SET last_readarr_error = ?, updated_at = ? WHERE id = ?').run(
+        conflictMessage,
+        now,
+        requestId
+      );
+      return {
+        stored: false,
+        conflict
+      };
+    }
+
+    try {
+      db.prepare(`
+        UPDATE requests
+        SET readarr_book_id = ?,
+            readarr_author_id = ?,
+            readarr_foreign_book_id = ?,
+            readarr_foreign_author_id = ?,
+            readarr_selected_title = ?,
+            readarr_selected_author = ?,
+            readarr_selected_release_date = ?,
+            last_readarr_error = NULL,
+            updated_at = ?
+        WHERE id = ?
+      `).run(
+        readarrResult.identifiers?.readarrBookId || null,
+        readarrResult.identifiers?.readarrAuthorId || null,
+        readarrResult.identifiers?.foreignBookId || null,
+        readarrResult.identifiers?.foreignAuthorId || null,
+        readarrResult.selectedBook?.title || null,
+        readarrResult.selectedBook?.author || null,
+        readarrResult.selectedBook?.releaseDate || null,
+        now,
+        requestId
+      );
+    } catch (e) {
+      db.prepare('UPDATE requests SET last_readarr_error = ?, updated_at = ? WHERE id = ?').run(
+        `Duplicate Readarr tracking blocked: ${e.message}`,
+        now,
+        requestId
+      );
+      return { stored: false };
+    }
+    return { stored: true };
+  }
+
+  db.prepare('UPDATE requests SET last_readarr_error = ?, updated_at = ? WHERE id = ?').run(
+    readarrResult?.error || 'Unknown Readarr error',
+    now,
+    requestId
+  );
+  return { stored: false };
 }
 
 // ============================================
@@ -812,7 +1352,7 @@ app.post('/api/book-request',
     body('bookTitle').trim().notEmpty().withMessage('Book title is required'),
     body('author').trim().notEmpty().withMessage('Author is required'),
     body('isbn').optional({ values: 'falsy' }).trim().matches(/^[\dXx-]{10,17}$/).withMessage('Invalid ISBN format'),
-    body('format').isIn(['epub', 'pdf', 'mobi', 'any']).withMessage('Invalid format'),
+    body('format').isIn(['epub', 'pdf', 'mobi', 'audiobook', 'any']).withMessage('Invalid format'),
     body('notes').optional().trim(),
     body('notifyOnComplete').optional().isBoolean(),
     body('turnstileToken').notEmpty().withMessage('Captcha verification required')
@@ -824,24 +1364,17 @@ app.post('/api/book-request',
     }
 
     const { requesterName, requesterEmail, bookTitle, author, isbn, format, notes, notifyOnComplete, turnstileToken } = req.body;
+    const safeRequesterName = escapeHtml(requesterName);
+    const safeRequesterEmail = escapeHtml(requesterEmail);
+    const safeBookTitle = escapeHtml(bookTitle);
+    const safeAuthor = escapeHtml(author);
+    const safeFormat = escapeHtml(format);
+    const safeNotes = escapeHtml(notes || 'None');
 
     // Verify Turnstile
     const isValidCaptcha = await verifyTurnstile(turnstileToken);
     if (!isValidCaptcha) {
       return res.status(400).json({ error: 'Captcha verification failed. Please try again.' });
-    }
-
-    // Check for duplicate requests (same email + book in last 24 hours)
-    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const duplicate = db.prepare(`
-      SELECT id FROM requests 
-      WHERE requester_email = ? 
-      AND LOWER(book_title) = LOWER(?) 
-      AND created_at > ?
-    `).get(requesterEmail, bookTitle, oneDayAgo);
-
-    if (duplicate) {
-      return res.status(409).json({ error: 'You have already submitted a request for this book recently.' });
     }
 
     // Check CWA availability FIRST - if available, don't create request
@@ -856,28 +1389,98 @@ app.post('/api/book-request',
       });
     }
 
+    // If a matching active request already exists, subscribe this user instead of creating a duplicate
+    const existingRequest = db.prepare(`
+      SELECT *
+      FROM requests
+      WHERE status IN ('pending', 'approved', 'searching', 'downloading')
+      AND LOWER(TRIM(book_title)) = LOWER(TRIM(?))
+      AND LOWER(TRIM(author)) = LOWER(TRIM(?))
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(bookTitle, author);
+
+    if (existingRequest) {
+      let statusToken = existingRequest.status_token;
+      if (!statusToken) {
+        statusToken = generateStatusToken();
+        db.prepare('UPDATE requests SET status_token = ?, updated_at = ? WHERE id = ?').run(
+          statusToken,
+          new Date().toISOString(),
+          existingRequest.id
+        );
+      }
+
+      const alreadyRequester = String(existingRequest.requester_email || '').toLowerCase() === String(requesterEmail || '').toLowerCase();
+      const alreadySubscribed = db.prepare(`
+        SELECT 1
+        FROM request_subscribers
+        WHERE request_id = ?
+        AND LOWER(subscriber_email) = LOWER(?)
+        LIMIT 1
+      `).get(existingRequest.id, requesterEmail);
+      const addedAsSubscriber = !alreadyRequester && !alreadySubscribed;
+
+      if (addedAsSubscriber) {
+        addSubscriberToRequest(existingRequest.id, requesterName, requesterEmail, notifyOnComplete !== false);
+      }
+
+      if (addedAsSubscriber && notifyOnComplete !== false) {
+        const subscriptionEmailContent = `
+          <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f;">Subscribed to Request Updates</h2>
+          <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${safeRequesterName},</p>
+          <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">
+            A matching request already exists for "<strong style="color: #667eea;">${safeBookTitle}</strong>" by ${safeAuthor}.
+          </p>
+          <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">
+            You have been subscribed and will receive updates as the request status changes.
+          </p>
+          <div style="background: #f0f0ff; border-left: 4px solid #667eea; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
+            <p style="margin: 0; font-size: 14px; color: #86868b;">Request ID</p>
+            <p style="margin: 5px 0 0 0; font-size: 18px; font-weight: 600; color: #667eea;">${existingRequest.id}</p>
+          </div>
+        `;
+        await sendEmail(requesterEmail, 'Subscribed to Book Request Updates - JcubHub Books', wrapEmailHtml(subscriptionEmailContent, 'Subscribed to Request Updates'));
+      }
+
+      return res.status(200).json({
+        success: true,
+        subscribedToExisting: true,
+        requestId: existingRequest.id,
+        statusToken,
+        message: alreadyRequester || alreadySubscribed
+          ? 'You are already subscribed to this request.'
+          : 'A matching request already exists. You have been subscribed for updates.',
+        status: existingRequest.status
+      });
+    }
+
     const now = new Date().toISOString();
     const id = generateId();
+    const statusToken = generateStatusToken();
     const readarrUrl = generateReadarrUrl(author, bookTitle, isbn);
+    const initialStatus = automation.autoApprove ? 'approved' : 'pending';
 
     // Insert request (cwa_available is false since we checked above)
     db.prepare(`
-      INSERT INTO requests (id, requester_name, requester_email, book_title, author, isbn, format, notes, status, notify_on_complete, readarr_url, cwa_available, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
-    `).run(id, requesterName, requesterEmail, bookTitle, author, isbn || null, format, notes || '', notifyOnComplete !== false ? 1 : 0, readarrUrl, 0, now, now);
+      INSERT INTO requests (id, requester_name, requester_email, book_title, author, isbn, format, notes, status, notify_on_complete, readarr_url, status_token, cwa_available, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, requesterName, requesterEmail, bookTitle, author, isbn || null, format, notes || '', initialStatus, notifyOnComplete !== false ? 1 : 0, readarrUrl, statusToken, 0, now, now);
+
+    addSubscriberToRequest(id, requesterName, requesterEmail, notifyOnComplete !== false);
 
     // Add initial status history
     db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
-      id, 'pending', now, 'Request submitted'
+      id, initialStatus, now, automation.autoApprove ? 'Request submitted and auto-approved' : 'Request submitted'
     );
 
     // Send confirmation email if opted in
     if (notifyOnComplete !== false) {
       const emailContent = `
         <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f;">Book Request Received</h2>
-        <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${requesterName},</p>
+        <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${safeRequesterName},</p>
         <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">
-          We've received your request for "<strong style="color: #667eea;">${bookTitle}</strong>" by ${author}.
+          We've received your request for "<strong style="color: #667eea;">${safeBookTitle}</strong>" by ${safeAuthor}.
         </p>
         <div style="background: #f0f0ff; border-left: 4px solid #667eea; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
           <p style="margin: 0; font-size: 14px; color: #86868b;">Request ID</p>
@@ -903,25 +1506,25 @@ app.post('/api/book-request',
           <tr>
             <td style="padding: 10px 0; border-bottom: 1px solid #e5e5e5;">
               <span style="color: #86868b; font-size: 14px;">From</span><br>
-              <span style="color: #1d1d1f; font-size: 16px;">${requesterName} (${requesterEmail})</span>
+              <span style="color: #1d1d1f; font-size: 16px;">${safeRequesterName} (${safeRequesterEmail})</span>
             </td>
           </tr>
           <tr>
             <td style="padding: 10px 0; border-bottom: 1px solid #e5e5e5;">
               <span style="color: #86868b; font-size: 14px;">Book</span><br>
-              <span style="color: #1d1d1f; font-size: 16px;"><strong>${bookTitle}</strong> by ${author}</span>
+              <span style="color: #1d1d1f; font-size: 16px;"><strong>${safeBookTitle}</strong> by ${safeAuthor}</span>
             </td>
           </tr>
           <tr>
             <td style="padding: 10px 0; border-bottom: 1px solid #e5e5e5;">
               <span style="color: #86868b; font-size: 14px;">Format</span><br>
-              <span style="color: #1d1d1f; font-size: 16px;">${format.toUpperCase()}</span>
+              <span style="color: #1d1d1f; font-size: 16px;">${safeFormat.toUpperCase()}</span>
             </td>
           </tr>
           <tr>
             <td style="padding: 10px 0; border-bottom: 1px solid #e5e5e5;">
               <span style="color: #86868b; font-size: 14px;">Notes</span><br>
-              <span style="color: #1d1d1f; font-size: 16px;">${notes || 'None'}</span>
+              <span style="color: #1d1d1f; font-size: 16px;">${safeNotes}</span>
             </td>
           </tr>
           <tr>
@@ -941,6 +1544,7 @@ app.post('/api/book-request',
     res.status(201).json({
       success: true,
       requestId: id,
+      statusToken,
       message: 'Your book request has been submitted successfully!',
       cwaAvailable: false
     });
@@ -958,22 +1562,230 @@ app.post('/api/book-request',
     if (automation.autoAddToReadarr && integrations.readarr) {
       try {
         logger.info('Auto-adding to Readarr...', { requestId: id, bookTitle, isbn });
-        const readarrResult = await addBookToReadarr({ bookTitle, author, isbn });
+        const readarrResult = await addBookToReadarr({ requestId: id, bookTitle, author, isbn, format });
+        const persistOutcome = persistReadarrResult(id, readarrResult, new Date().toISOString());
+        if (readarrResult.success && persistOutcome?.conflict) {
+          readarrResult.success = false;
+          readarrResult.error = `Duplicate tracking prevented (existing request ${persistOutcome.conflict.id})`;
+        }
         
-        if (readarrResult.success) {
+        if (readarrResult.success && persistOutcome?.stored) {
           const updateNow = new Date().toISOString();
-          db.prepare("UPDATE requests SET status = 'searching', updated_at = ? WHERE id = ?").run(updateNow, id);
-          db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
-            id, 'searching', updateNow, 'Automatically added to Readarr'
-          );
+          setRequestStatus(id, 'searching', updateNow, 'Automatically added to Readarr');
           logger.info('Auto-added to Readarr successfully', { requestId: id });
         } else {
-          logger.warn('Auto-add to Readarr failed', { requestId: id, error: readarrResult.error });
+          const failureReason = persistOutcome?.conflict
+            ? `Duplicate tracking prevented (existing request ${persistOutcome.conflict.id})`
+            : (readarrResult.error || 'Unknown Readarr error');
+          logger.warn('Auto-add to Readarr failed', { requestId: id, error: failureReason });
+          const requestForNotify = db.prepare('SELECT * FROM requests WHERE id = ?').get(id);
+          await notifyAdminLifecycle('readarr_failed', requestForNotify, { message: failureReason });
         }
       } catch (error) {
         logger.error('Auto-add to Readarr error', { requestId: id, error: error.message });
       }
     }
+  }
+);
+
+// Public request status lookup
+app.post('/api/request-status',
+  requestLimiter,
+  [
+    body('requestId').optional().trim(),
+    body('email').optional().isEmail().normalizeEmail(),
+    body('statusToken').optional().trim().isLength({ min: 12 }).withMessage('Invalid status token')
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { requestId, email, statusToken } = req.body;
+    if (!statusToken && !(requestId && email)) {
+      return res.status(400).json({ error: 'Provide statusToken or requestId + email' });
+    }
+
+    const request = findPublicRequest(requestId, email, statusToken);
+    if (!request) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+
+    let cwaBookLink = request.cwa_book_link || null;
+    const shouldResolveCwaLink = (request.cwa_available || request.status === 'completed') && !cwaBookLink;
+    if (shouldResolveCwaLink) {
+      const resolved = await checkCwaAvailability(request.book_title, request.author);
+      if (resolved.available && resolved.bookLink) {
+        cwaBookLink = resolved.bookLink;
+        updateRequestCwaState(request.id, new Date().toISOString(), true, cwaBookLink);
+      } else {
+        cwaBookLink = buildCwaSearchLink(request.book_title);
+      }
+    }
+
+    const history = db.prepare(`
+      SELECT status, changed_at, notes
+      FROM status_history
+      WHERE request_id = ?
+      ORDER BY changed_at DESC
+      LIMIT 25
+    `).all(request.id);
+
+    const isSubscriber = !!db.prepare(`
+      SELECT 1 FROM request_subscribers
+      WHERE request_id = ?
+      AND LOWER(subscriber_email) = LOWER(?)
+      LIMIT 1
+    `).get(request.id, email || '');
+
+    res.json({
+      id: request.id,
+      statusToken: request.status_token || null,
+      status: request.status,
+      createdAt: request.created_at,
+      updatedAt: request.updated_at,
+      bookTitle: request.book_title,
+      author: request.author,
+      format: request.format,
+      notes: request.notes || '',
+      cwaAvailable: !!request.cwa_available || !!cwaBookLink || request.status === 'completed',
+      downloadLink: cwaBookLink || null,
+      monitoring: (request.readarr_book_id || request.readarr_foreign_book_id || request.readarr_selected_title) ? {
+        readarrBookId: request.readarr_book_id || null,
+        foreignBookId: request.readarr_foreign_book_id || null,
+        selectedTitle: request.readarr_selected_title || request.book_title,
+        selectedAuthor: request.readarr_selected_author || request.author,
+        selectedReleaseDate: request.readarr_selected_release_date || null
+      } : null,
+      isSubscriber,
+      history
+    });
+  }
+);
+
+// Public feedback endpoint (end-user verification)
+app.post('/api/request-feedback',
+  requestLimiter,
+  [
+    body('requestId').optional().trim(),
+    body('email').optional().isEmail().normalizeEmail(),
+    body('statusToken').optional().trim().isLength({ min: 12 }).withMessage('Invalid status token'),
+    body('feedbackType').isIn(['match_confirmed', 'match_mismatch']).withMessage('Invalid feedback type'),
+    body('message').optional().trim().isLength({ max: 1000 }).withMessage('Message too long')
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { requestId, email, statusToken, feedbackType, message } = req.body;
+    if (!statusToken && !(requestId && email)) {
+      return res.status(400).json({ error: 'Provide statusToken or requestId + email' });
+    }
+
+    const request = findPublicRequest(requestId, email, statusToken);
+    if (!request) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+
+    const reporter = String(email || request.requester_email || '').trim();
+    const now = new Date().toISOString();
+    const cleanMessage = String(message || '').trim();
+    const feedbackNote = feedbackType === 'match_confirmed'
+      ? `End-user confirmed monitored match${reporter ? ` (${reporter})` : ''}${cleanMessage ? `: ${cleanMessage}` : ''}`
+      : `End-user reported potential wrong monitored match${reporter ? ` (${reporter})` : ''}${cleanMessage ? `: ${cleanMessage}` : ''}`;
+
+    db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
+      request.id,
+      request.status,
+      now,
+      feedbackNote
+    );
+
+    if (feedbackType === 'match_mismatch') {
+      await notifyAdminLifecycle('mismatch_reported', request, {
+        reporterEmail: reporter,
+        message: cleanMessage
+      });
+    }
+
+    res.json({ success: true, message: 'Feedback saved' });
+  }
+);
+
+// Public send-to-eReader action (email a direct CWA link)
+app.post('/api/request-send-ereader',
+  requestLimiter,
+  [
+    body('requestId').optional().trim(),
+    body('email').optional().isEmail().normalizeEmail(),
+    body('statusToken').optional().trim().isLength({ min: 12 }).withMessage('Invalid status token'),
+    body('ereaderEmail').isEmail().normalizeEmail().withMessage('Valid eReader email is required')
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    if (!ereader.enabled) {
+      return res.status(400).json({ error: 'Send-to-eReader is disabled by admin' });
+    }
+    if (!transporter) {
+      return res.status(503).json({ error: 'Email transport is not configured' });
+    }
+
+    const { requestId, email, statusToken, ereaderEmail } = req.body;
+    if (!statusToken && !(requestId && email)) {
+      return res.status(400).json({ error: 'Provide statusToken or requestId + email' });
+    }
+
+    const request = findPublicRequest(requestId, email, statusToken);
+    if (!request) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+
+    if (!(request.cwa_available || request.status === 'completed')) {
+      return res.status(409).json({ error: 'Book is not available yet' });
+    }
+
+    const domain = String(ereaderEmail || '').split('@')[1]?.toLowerCase() || '';
+    if (ereader.allowedDomains.length > 0 && !ereader.allowedDomains.includes(domain)) {
+      return res.status(400).json({
+        error: `Unsupported eReader email domain. Allowed domains: ${ereader.allowedDomains.join(', ')}`
+      });
+    }
+
+    const cwaLink = await resolveCwaLinkForRequest(request);
+    if (!cwaLink) {
+      return res.status(409).json({ error: 'No download link available yet' });
+    }
+    updateRequestCwaState(request.id, new Date().toISOString(), true, cwaLink);
+
+    const safeBookTitle = escapeHtml(request.book_title);
+    const safeAuthor = escapeHtml(request.author);
+    const safeRequestId = escapeHtml(request.id);
+    const ereaderContent = `
+      <h2 style="margin: 0 0 16px 0;">Your Book Link</h2>
+      <p style="margin: 0 0 10px 0;"><strong>${safeBookTitle}</strong> by ${safeAuthor}</p>
+      <p style="margin: 0 0 12px 0;">Request ID: ${safeRequestId}</p>
+      <p style="margin: 0 0 16px 0;">Open this link from your eReader browser or reading app:</p>
+      <p style="margin: 0;"><a href="${cwaLink}" style="color:#667eea;">${escapeHtml(cwaLink)}</a></p>
+    `;
+
+    await sendEmail(ereaderEmail, `Book Link: ${request.book_title} - JcubHub Books`, wrapEmailHtml(ereaderContent, 'Send to eReader'));
+
+    const now = new Date().toISOString();
+    db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
+      request.id,
+      request.status,
+      now,
+      `Sent to eReader (${ereaderEmail}) by ${email || 'status-token user'}`
+    );
+
+    res.json({ success: true, sentTo: ereaderEmail, downloadLink: cwaLink });
   }
 );
 
@@ -1062,8 +1874,9 @@ app.get('/api/admin/requests/:id', authenticateToken, (req, res) => {
   }
 
   const history = db.prepare('SELECT * FROM status_history WHERE request_id = ? ORDER BY changed_at DESC').all(req.params.id);
+  const subscribers = getRequestSubscribers(req.params.id);
 
-  res.json({ ...request, statusHistory: history });
+  res.json({ ...request, statusHistory: history, subscribers });
 });
 
 // Update request status
@@ -1086,46 +1899,87 @@ app.patch('/api/admin/requests/:id',
     }
 
     const { status, notes, addToReadarr } = req.body;
-    const now = new Date().toISOString();
+    if (!status && !addToReadarr) {
+      return res.status(400).json({ error: 'Either status or addToReadarr must be provided' });
+    }
+    const effectiveTargetStatus = status || request.status;
+    if (addToReadarr && ['completed', 'rejected', 'unavailable'].includes(effectiveTargetStatus)) {
+      return res.status(409).json({ error: `Cannot add a ${effectiveTargetStatus} request to Readarr` });
+    }
+
+    let now = new Date().toISOString();
     let readarrResult = null;
+    let notificationStatus = null;
+    let appliedStatus = request.status;
 
-    if (status) {
-      // Update request
-      db.prepare('UPDATE requests SET status = ?, updated_at = ? WHERE id = ?').run(status, now, req.params.id);
-      
-      // Add to history
-      db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
-        req.params.id, status, now, notes || ''
-      );
+    if (status && (!addToReadarr || status !== 'searching')) {
+      setRequestStatus(req.params.id, status, now, notes || '');
+      appliedStatus = status;
+      notificationStatus = status;
+    }
 
-      // Auto-add to Readarr if requested (typically when approving)
-      if (addToReadarr) {
-        readarrResult = await addBookToReadarr({
-          bookTitle: request.book_title,
-          author: request.author,
-          isbn: request.isbn
-        });
-        
-        if (readarrResult.success) {
-          // Update status to searching
-          db.prepare("UPDATE requests SET status = 'searching', updated_at = ? WHERE id = ?").run(now, req.params.id);
-          db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
-            req.params.id, 'searching', now, 'Automatically added to Readarr'
-          );
-          logger.info('Auto-added to Readarr', { requestId: req.params.id, bookTitle: request.book_title });
-        } else {
-          logger.warn('Failed to auto-add to Readarr', { requestId: req.params.id, error: readarrResult.error });
-        }
+    if (addToReadarr) {
+      readarrResult = await addBookToReadarr({
+        requestId: req.params.id,
+        bookTitle: request.book_title,
+        author: request.author,
+        isbn: request.isbn,
+        format: request.format
+      });
+
+      now = new Date().toISOString();
+      const persistOutcome = persistReadarrResult(req.params.id, readarrResult, now);
+      if (readarrResult.success && persistOutcome?.conflict) {
+        readarrResult.success = false;
+        readarrResult.error = `Duplicate tracking prevented (existing request ${persistOutcome.conflict.id})`;
+        readarrResult.duplicateDetected = true;
+        readarrResult.duplicateOfRequestId = persistOutcome.conflict.id;
       }
 
-      // Send notification emails based on status (if user opted in)
-      if (request.notify_on_complete) {
-        const cwaLink = process.env.CWA_URL || 'https://cwa.jcubhub.com';
+      if (readarrResult.success && persistOutcome?.stored) {
+        setRequestStatus(req.params.id, 'searching', now, 'Automatically added to Readarr');
+        appliedStatus = 'searching';
+        notificationStatus = 'searching';
+        logger.info('Auto-added to Readarr', { requestId: req.params.id, bookTitle: request.book_title });
+      } else {
+        const readarrFailure = persistOutcome?.conflict
+          ? `Duplicate tracking prevented (existing request ${persistOutcome.conflict.id})`
+          : (readarrResult.error || 'Unknown Readarr error');
+        logger.warn('Failed to auto-add to Readarr', { requestId: req.params.id, error: readarrFailure });
+        await notifyAdminLifecycle('readarr_failed', request, { message: readarrFailure });
+
+        if (status === 'searching') {
+          const fallbackStatus = request.status === 'pending' ? 'approved' : request.status;
+          if (fallbackStatus !== appliedStatus) {
+            setRequestStatus(req.params.id, fallbackStatus, now, 'Readarr add failed; kept previous workflow status');
+            appliedStatus = fallbackStatus;
+            notificationStatus = fallbackStatus;
+          }
+        }
+
+        db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
+          req.params.id,
+          appliedStatus,
+          now,
+          `Readarr add failed: ${readarrFailure}`
+        );
+      }
+    }
+
+      // Send notification emails based on effective status
+      if (notificationStatus) {
+        const cwaLink = await resolveCwaLinkForRequest(request);
+        if (notificationStatus === 'completed') {
+          updateRequestCwaState(req.params.id, now, true, cwaLink);
+        }
+        const safeRequesterName = escapeHtml(request.requester_name);
+        const safeBookTitle = escapeHtml(request.book_title);
+        const safeAuthor = escapeHtml(request.author);
         let emailContent = null;
         let emailSubject = null;
         let emailTitle = null;
         
-        if (status === 'completed') {
+        if (notificationStatus === 'completed') {
           emailSubject = 'Your Book is Ready! - JcubHub Books';
           emailTitle = 'Your Book is Ready';
           emailContent = `
@@ -1133,16 +1987,16 @@ app.patch('/api/admin/requests/:id',
               <span style="font-size: 48px;">🎉</span>
             </div>
             <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Great News! Your Book is Ready</h2>
-            <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+            <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${safeRequesterName},</p>
             <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
-              Your requested book "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} is now available in our library!
+              Your requested book "<strong style="color: #667eea;">${safeBookTitle}</strong>" by ${safeAuthor} is now available in our library!
             </p>
             <div style="text-align: center; margin: 30px 0;">
               <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
             </div>
             <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b; text-align: center;">Happy reading!<br><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
           `;
-        } else if (status === 'approved' || status === 'searching') {
+        } else if (notificationStatus === 'approved' || notificationStatus === 'searching') {
           emailSubject = 'Book Request Approved - JcubHub Books';
           emailTitle = 'Request Approved';
           emailContent = `
@@ -1150,9 +2004,9 @@ app.patch('/api/admin/requests/:id',
               <span style="font-size: 48px;">✅</span>
             </div>
             <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Your Request Has Been Approved!</h2>
-            <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+            <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${safeRequesterName},</p>
             <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
-              Great news! Your request for "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} has been approved.
+              Great news! Your request for "<strong style="color: #667eea;">${safeBookTitle}</strong>" by ${safeAuthor} has been approved.
             </p>
             <div style="background: #f0f0ff; border-left: 4px solid #667eea; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
               <p style="margin: 0; font-size: 14px; color: #86868b;">What happens next?</p>
@@ -1160,18 +2014,18 @@ app.patch('/api/admin/requests/:id',
             </div>
             <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b; text-align: center;">Thank you for your patience!<br><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
           `;
-        } else if (status === 'rejected') {
+        } else if (notificationStatus === 'rejected') {
           emailSubject = 'Book Request Update - JcubHub Books';
           emailTitle = 'Request Update';
-          const rejectionReason = notes || 'The book could not be added to our library at this time.';
+          const rejectionReason = escapeHtml(notes || 'The book could not be added to our library at this time.');
           emailContent = `
             <div style="text-align: center; margin-bottom: 30px;">
               <span style="font-size: 48px;">📚</span>
             </div>
             <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Update on Your Book Request</h2>
-            <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+            <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${safeRequesterName},</p>
             <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
-              We've reviewed your request for "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author}.
+              We've reviewed your request for "<strong style="color: #667eea;">${safeBookTitle}</strong>" by ${safeAuthor}.
             </p>
             <div style="background: #fef2f2; border-left: 4px solid #ef4444; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
               <p style="margin: 0; font-size: 14px; color: #991b1b;">Unfortunately, we're unable to fulfill this request:</p>
@@ -1180,7 +2034,7 @@ app.patch('/api/admin/requests/:id',
             <p style="margin: 20px 0 0 0; font-size: 16px; color: #1d1d1f;">Feel free to submit another request for a different book anytime.</p>
             <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b; text-align: center;"><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
           `;
-        } else if (status === 'unavailable') {
+        } else if (notificationStatus === 'unavailable') {
           emailSubject = 'Book Unavailable - JcubHub Books';
           emailTitle = 'Book Unavailable';
           emailContent = `
@@ -1188,9 +2042,9 @@ app.patch('/api/admin/requests/:id',
               <span style="font-size: 48px;">😔</span>
             </div>
             <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Book Currently Unavailable</h2>
-            <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+            <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${safeRequesterName},</p>
             <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
-              We searched extensively but couldn't find "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} in any of our sources.
+              We searched extensively but couldn't find "<strong style="color: #667eea;">${safeBookTitle}</strong>" by ${safeAuthor} in any of our sources.
             </p>
             <div style="background: #fffbeb; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0; border-radius: 0 8px 8px 0;">
               <p style="margin: 0; font-size: 16px; color: #1d1d1f;">This could be because the book is very new, rare, or has limited digital availability. We'll keep trying if new sources become available.</p>
@@ -1201,23 +2055,34 @@ app.patch('/api/admin/requests/:id',
         }
         
         if (emailContent && emailSubject) {
+          const wrappedEmail = wrapEmailHtml(emailContent, emailTitle);
           try {
-            await sendEmail(request.requester_email, emailSubject, wrapEmailHtml(emailContent, emailTitle));
-            logger.info('Status notification email sent', { requestId: req.params.id, status, email: request.requester_email });
+            if (request.notify_on_complete) {
+              await sendEmail(request.requester_email, emailSubject, wrappedEmail);
+              logger.info('Status notification email sent', { requestId: req.params.id, status: notificationStatus, email: request.requester_email });
+            }
+            await notifySubscribers(request, emailSubject, wrappedEmail, { excludeEmails: [request.requester_email] });
           } catch (emailError) {
             logger.error('Failed to send status notification email', { error: emailError.message, requestId: req.params.id });
           }
         }
+
+        if (notificationStatus === 'completed') {
+          await notifyAdminLifecycle('completed', { ...request, id: req.params.id, cwa_book_link: cwaLink }, { cwaLink });
+        } else if (notificationStatus === 'rejected' || notificationStatus === 'unavailable') {
+          await notifyAdminLifecycle('readarr_failed', { ...request, id: req.params.id }, {
+            message: notes || `Status changed to ${notificationStatus}`
+          });
+        }
       }
 
-      logger.info('Request status updated', { 
-        requestId: req.params.id, 
-        oldStatus: request.status, 
-        newStatus: status,
-        admin: req.user.username,
-        addedToReadarr: readarrResult?.success || false
-      });
-    }
+    logger.info('Request status updated', {
+      requestId: req.params.id,
+      oldStatus: request.status,
+      newStatus: appliedStatus,
+      admin: req.user.username,
+      addedToReadarr: readarrResult?.success || false
+    });
 
     const updated = db.prepare('SELECT * FROM requests WHERE id = ?').get(req.params.id);
     res.json({ 
@@ -1280,37 +2145,43 @@ app.post('/api/admin/batch/process-pending', authenticateToken, async (req, res)
   };
 
   for (const request of pendingRequests) {
-    results.processed++;
-    
-    try {
-      const readarrResult = await addBookToReadarr({
-        bookTitle: request.book_title,
-        author: request.author,
-        isbn: request.isbn
-      });
-
-      const now = new Date().toISOString();
+      results.processed++;
       
-      if (readarrResult.success) {
-        db.prepare("UPDATE requests SET status = 'searching', updated_at = ? WHERE id = ?").run(now, request.id);
-        db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
-          request.id, 'searching', now, 'Batch processed - Added to Readarr'
-        );
-        results.succeeded++;
-      } else {
-        // Mark as approved but note the error
-        db.prepare("UPDATE requests SET status = 'approved', updated_at = ? WHERE id = ?").run(now, request.id);
-        db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
-          request.id, 'approved', now, `Approved but Readarr add failed: ${readarrResult.error}`
-        );
+      try {
+        const readarrResult = await addBookToReadarr({
+          requestId: request.id,
+          bookTitle: request.book_title,
+          author: request.author,
+          isbn: request.isbn,
+          format: request.format
+        });
+
+        const now = new Date().toISOString();
+        const persistOutcome = persistReadarrResult(request.id, readarrResult, now);
+        if (readarrResult.success && persistOutcome?.conflict) {
+          readarrResult.success = false;
+          readarrResult.error = `Duplicate tracking prevented (existing request ${persistOutcome.conflict.id})`;
+        }
+        
+        if (readarrResult.success && persistOutcome?.stored) {
+          setRequestStatus(request.id, 'searching', now, 'Batch processed - Added to Readarr');
+          results.succeeded++;
+        } else {
+          const readarrFailure = persistOutcome?.conflict
+            ? `Duplicate tracking prevented (existing request ${persistOutcome.conflict.id})`
+            : (readarrResult.error || 'Unknown Readarr error');
+          // Mark as approved but note the error
+          setRequestStatus(request.id, 'approved', now, `Approved but Readarr add failed: ${readarrFailure}`);
+          results.failed++;
+          results.errors.push({ id: request.id, book: request.book_title, error: readarrFailure });
+          await notifyAdminLifecycle('readarr_failed', request, { message: readarrFailure });
+        }
+      } catch (error) {
         results.failed++;
-        results.errors.push({ id: request.id, book: request.book_title, error: readarrResult.error });
+        results.errors.push({ id: request.id, book: request.book_title, error: error.message });
+        await notifyAdminLifecycle('readarr_failed', request, { message: error.message });
       }
-    } catch (error) {
-      results.failed++;
-      results.errors.push({ id: request.id, book: request.book_title, error: error.message });
     }
-  }
 
   logger.info('Batch process completed', { 
     admin: req.user.username, 
@@ -1336,29 +2207,39 @@ app.post('/api/admin/batch/complete-all', authenticateToken, async (req, res) =>
   let completedCount = 0;
 
   for (const request of inProgress) {
-    db.prepare("UPDATE requests SET status = 'completed', cwa_available = 1, updated_at = ? WHERE id = ?").run(now, request.id);
+    const cwaLink = await resolveCwaLinkForRequest(request);
+    updateRequestCwaState(request.id, now, true, cwaLink);
+    db.prepare("UPDATE requests SET status = 'completed', updated_at = ? WHERE id = ?").run(now, request.id);
     db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
       request.id, 'completed', now, 'Batch completed by admin'
     );
 
-    // Send notification if opted in
-    if (request.notify_on_complete) {
-      const cwaLink = process.env.CWA_URL || 'https://cwa.jcubhub.com';
+    // Notify requester (if opted in) and any subscribers
+    if (request.notify_on_complete || (await getRequestSubscribers(request.id)).length > 0) {
+      const safeRequesterName = escapeHtml(request.requester_name);
+      const safeBookTitle = escapeHtml(request.book_title);
+      const safeAuthor = escapeHtml(request.author);
       const emailContent = `
         <div style="text-align: center; margin-bottom: 30px;">
           <span style="font-size: 48px;">🎉</span>
         </div>
         <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Great News! Your Book is Ready</h2>
-        <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+        <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${safeRequesterName},</p>
         <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
-          Your requested book "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} is now available!
+          Your requested book "<strong style="color: #667eea;">${safeBookTitle}</strong>" by ${safeAuthor} is now available!
         </p>
         <div style="text-align: center; margin: 30px 0;">
           <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
         </div>
       `;
-      await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrapEmailHtml(emailContent, 'Your Book is Ready'));
+      const wrappedEmail = wrapEmailHtml(emailContent, 'Your Book is Ready');
+      if (request.notify_on_complete) {
+        await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrappedEmail);
+      }
+      await notifySubscribers(request, 'Your Book is Ready! - JcubHub Books', wrappedEmail, { excludeEmails: [request.requester_email] });
     }
+
+    await notifyAdminLifecycle('completed', { ...request, cwa_book_link: cwaLink }, { cwaLink });
     
     completedCount++;
   }
@@ -1379,14 +2260,14 @@ app.get('/api/admin/readarr/queue', authenticateToken, async (req, res) => {
 
   try {
     // Get download queue
-    const queueResponse = await fetch(`${process.env.READARR_URL}/api/v1/queue?includeBook=true`, {
+    const queueResponse = await fetchWithTimeout(`${process.env.READARR_URL}/api/v1/queue?includeBook=true`, {
       headers: { 'X-Api-Key': process.env.READARR_API_KEY }
-    });
+    }, 'Readarr queue');
     
     // Get recent history (last 20 completed)
-    const historyResponse = await fetch(`${process.env.READARR_URL}/api/v1/history?pageSize=20&sortKey=date&sortDirection=descending`, {
+    const historyResponse = await fetchWithTimeout(`${process.env.READARR_URL}/api/v1/history?pageSize=20&sortKey=date&sortDirection=descending`, {
       headers: { 'X-Api-Key': process.env.READARR_API_KEY }
-    });
+    }, 'Readarr history');
 
     const queue = queueResponse.ok ? await queueResponse.json() : { records: [] };
     const history = historyResponse.ok ? await historyResponse.json() : { records: [] };
@@ -1433,9 +2314,9 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
     }
 
     // Test connection to Readarr
-    const testResponse = await fetch(`${process.env.READARR_URL}/api/v1/system/status`, {
+    const testResponse = await fetchWithTimeout(`${process.env.READARR_URL}/api/v1/system/status`, {
       headers: { 'X-Api-Key': process.env.READARR_API_KEY }
-    });
+    }, 'Readarr system status');
     
     if (!testResponse.ok) {
       return res.json({ 
@@ -1453,9 +2334,9 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
     
     logger.info('Test Readarr search', { title, author, isbn: isbn || '(none)', searchQuery: rawQuery });
     
-    const searchResponse = await fetch(`${process.env.READARR_URL}/api/v1/book/lookup?term=${searchQuery}`, {
+    const searchResponse = await fetchWithTimeout(`${process.env.READARR_URL}/api/v1/book/lookup?term=${searchQuery}`, {
       headers: { 'X-Api-Key': process.env.READARR_API_KEY }
-    });
+    }, 'Readarr test search');
     
     if (!searchResponse.ok) {
       return res.json({
@@ -1502,8 +2383,9 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
       }
       
       // Author match
-      if (bookAuthorLower.includes(normalizedSearchAuthor) || 
-          normalizedSearchAuthor.includes(bookAuthorLower)) {
+      if (normalizedSearchAuthor &&
+          (bookAuthorLower.includes(normalizedSearchAuthor) ||
+          normalizedSearchAuthor.includes(bookAuthorLower))) {
         score += 20;
         scoreBreakdown.push('+20 author match');
       }
@@ -1561,19 +2443,50 @@ app.post('/api/admin/readarr/add', authenticateToken, async (req, res) => {
     return res.status(404).json({ error: 'Request not found' });
   }
 
+  if (['completed', 'rejected', 'unavailable'].includes(request.status)) {
+    return res.status(409).json({ success: false, error: `Cannot add a ${request.status} request to Readarr` });
+  }
+
+  if (request.status === 'searching' && request.readarr_book_id) {
+    return res.json({ success: true, message: 'Request already tracked in Readarr', alreadyTracked: true });
+  }
+
   const result = await addBookToReadarr({
+    requestId,
     bookTitle: request.book_title,
     author: request.author,
-    isbn: request.isbn
+    isbn: request.isbn,
+    format: request.format
   });
 
-  if (result.success) {
-    // Update request status
-    const now = new Date().toISOString();
-    db.prepare("UPDATE requests SET status = 'searching', updated_at = ? WHERE id = ?").run(now, requestId);
+  const now = new Date().toISOString();
+  const persistOutcome = persistReadarrResult(requestId, result, now);
+  if (result.success && persistOutcome?.conflict) {
+    result.success = false;
+    result.error = `Duplicate tracking prevented (existing request ${persistOutcome.conflict.id})`;
+    result.duplicateDetected = true;
+    result.duplicateOfRequestId = persistOutcome.conflict.id;
+  }
+
+  if (result.success && persistOutcome?.stored) {
+    setRequestStatus(requestId, 'searching', now, 'Added to Readarr for download');
+  } else if (request.status === 'pending') {
+    const readarrFailure = persistOutcome?.conflict
+      ? `Duplicate tracking prevented (existing request ${persistOutcome.conflict.id})`
+      : (result.error || 'Unknown Readarr error');
+    setRequestStatus(requestId, 'approved', now, `Readarr add failed: ${readarrFailure}`);
+    await notifyAdminLifecycle('readarr_failed', request, { message: readarrFailure });
+  } else {
+    const readarrFailure = persistOutcome?.conflict
+      ? `Duplicate tracking prevented (existing request ${persistOutcome.conflict.id})`
+      : (result.error || 'Unknown Readarr error');
     db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
-      requestId, 'searching', now, 'Added to Readarr for download'
+      requestId,
+      request.status,
+      now,
+      `Readarr add failed: ${readarrFailure}`
     );
+    await notifyAdminLifecycle('readarr_failed', request, { message: readarrFailure });
   }
 
   res.json(result);
@@ -1598,49 +2511,101 @@ app.post('/api/webhook/book-complete',
       }
     }
 
-    const { bookTitle, author, eventType } = req.body;
+    const eventType = req.body.eventType || req.body.event || req.body.type;
+    const webhookTitle = req.body.bookTitle || req.body.title || req.body.book?.title || '';
+    const webhookAuthor = req.body.author || req.body.authorName || req.body.book?.authorName || req.body.book?.author?.authorName || '';
+    const webhookBookId = parsePositiveInt(req.body.bookId || req.body.book?.id || req.body.book?.bookId || req.body.id);
+    const webhookForeignBookId = req.body.foreignBookId || req.body.book?.foreignBookId || null;
+    const webhookForeignAuthorId = req.body.foreignAuthorId || req.body.author?.foreignAuthorId || req.body.book?.author?.foreignAuthorId || null;
 
-    // Handle Readarr webhook format
-    if (eventType === 'Download' || eventType === 'BookFileImported') {
-      // Find matching pending requests
-      const requests = db.prepare(`
-        SELECT * FROM requests 
-        WHERE status IN ('pending', 'approved', 'searching', 'downloading')
-        AND LOWER(book_title) LIKE LOWER(?)
-        AND LOWER(author) LIKE LOWER(?)
-      `).all(`%${bookTitle}%`, `%${author}%`);
+    // Handle Readarr/Chaptarr completion webhooks
+    if (['Download', 'BookFileImported', 'DownloadFolderImported', 'Import'].includes(eventType)) {
+      let requests = [];
+
+      if (webhookBookId) {
+        requests = db.prepare(`
+          SELECT * FROM requests
+          WHERE status IN ('pending', 'approved', 'searching', 'downloading')
+          AND readarr_book_id = ?
+        `).all(webhookBookId);
+      }
+
+      if (requests.length === 0 && (webhookForeignBookId || webhookForeignAuthorId)) {
+        const candidates = db.prepare(`
+          SELECT * FROM requests
+          WHERE status IN ('pending', 'approved', 'searching', 'downloading')
+          AND (readarr_foreign_book_id IS NOT NULL OR readarr_foreign_author_id IS NOT NULL)
+        `).all();
+        requests = candidates.filter(r => matchesByForeignId(r, webhookForeignBookId, webhookForeignAuthorId));
+      }
+
+      if (requests.length === 0 && webhookTitle && webhookAuthor) {
+        requests = db.prepare(`
+          SELECT * FROM requests
+          WHERE status IN ('pending', 'approved', 'searching', 'downloading')
+          AND LOWER(TRIM(book_title)) = LOWER(TRIM(?))
+          AND LOWER(TRIM(author)) = LOWER(TRIM(?))
+        `).all(webhookTitle, webhookAuthor);
+      }
+
+      if (requests.length === 0 && webhookTitle && webhookAuthor) {
+        const fuzzyMatches = db.prepare(`
+          SELECT * FROM requests
+          WHERE status IN ('pending', 'approved', 'searching', 'downloading')
+          AND LOWER(book_title) LIKE LOWER(?)
+          AND LOWER(author) LIKE LOWER(?)
+        `).all(`%${webhookTitle}%`, `%${webhookAuthor}%`);
+
+        if (fuzzyMatches.length === 1) {
+          requests = fuzzyMatches;
+        } else if (fuzzyMatches.length > 1) {
+          logger.warn('Webhook match ambiguous, skipping fuzzy completion', {
+            eventType,
+            title: webhookTitle,
+            author: webhookAuthor,
+            matches: fuzzyMatches.length
+          });
+        }
+      }
 
       const now = new Date().toISOString();
 
       for (const request of requests) {
-        // Update to completed
-        db.prepare("UPDATE requests SET status = 'completed', cwa_available = 1, updated_at = ? WHERE id = ?").run(now, request.id);
-        db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
-          request.id, 'completed', now, 'Book downloaded via Readarr webhook'
-        );
+        const cwaLink = await resolveCwaLinkForRequest(request);
+        updateRequestCwaState(request.id, now, true, cwaLink);
+        setRequestStatus(request.id, 'completed', now, 'Book downloaded via Readarr webhook');
 
-        // Send notification if opted in
-        if (request.notify_on_complete) {
-          const cwaLink = process.env.CWA_URL || 'https://cwa.jcubhub.com';
+        // Notify requester (if opted in) and any subscribers
+        if (request.notify_on_complete || (await getRequestSubscribers(request.id)).length > 0) {
+          const safeRequesterName = escapeHtml(request.requester_name);
+          const safeBookTitle = escapeHtml(request.book_title);
+          const safeAuthor = escapeHtml(request.author);
           const webhookEmailContent = `
             <div style="text-align: center; margin-bottom: 30px;">
               <span style="font-size: 48px;">🎉</span>
             </div>
             <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Great News! Your Book is Ready</h2>
-            <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+            <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${safeRequesterName},</p>
             <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
-              Your requested book "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} is now available in our library!
+              Your requested book "<strong style="color: #667eea;">${safeBookTitle}</strong>" by ${safeAuthor} is now available in our library!
             </p>
             <div style="text-align: center; margin: 30px 0;">
               <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
             </div>
             <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b; text-align: center;">Happy reading!<br><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
           `;
-          await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrapEmailHtml(webhookEmailContent, 'Your Book is Ready'));
+          const wrappedWebhookEmail = wrapEmailHtml(webhookEmailContent, 'Your Book is Ready');
+          if (request.notify_on_complete) {
+            await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrappedWebhookEmail);
+          }
+          await notifySubscribers(request, 'Your Book is Ready! - JcubHub Books', wrappedWebhookEmail, { excludeEmails: [request.requester_email] });
         }
+
+        await notifyAdminLifecycle('completed', { ...request, cwa_book_link: cwaLink }, { cwaLink });
       }
 
-      return res.json({ success: true, updatedCount: requests.length });
+      const matchedBy = webhookBookId ? 'readarr_book_id' : (webhookForeignBookId || webhookForeignAuthorId) ? 'foreign_id' : 'title_author';
+      return res.json({ success: true, updatedCount: requests.length, matchedBy });
     }
 
     res.json({ success: true, message: 'Webhook received' });
@@ -1665,30 +2630,40 @@ app.post('/api/admin/sync-cwa', authenticateToken, async (req, res) => {
     const cwaCheck = await checkCwaAvailability(request.book_title, request.author);
     
     if (cwaCheck.available && !request.cwa_available) {
-      db.prepare("UPDATE requests SET cwa_available = 1, status = 'completed', updated_at = ? WHERE id = ?").run(now, request.id);
+      const cwaLink = cwaCheck.bookLink || buildCwaSearchLink(request.book_title);
+      updateRequestCwaState(request.id, now, true, cwaLink);
+      db.prepare("UPDATE requests SET status = 'completed', updated_at = ? WHERE id = ?").run(now, request.id);
       db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
         request.id, 'completed', now, 'Book found in CWA library during sync'
       );
 
-      // Send notification if opted in
-      if (request.notify_on_complete) {
-        const cwaLink = process.env.CWA_URL || 'https://cwa.jcubhub.com';
+      // Notify requester (if opted in) and any subscribers
+      if (request.notify_on_complete || (await getRequestSubscribers(request.id)).length > 0) {
+        const safeRequesterName = escapeHtml(request.requester_name);
+        const safeBookTitle = escapeHtml(request.book_title);
+        const safeAuthor = escapeHtml(request.author);
         const syncEmailContent = `
           <div style="text-align: center; margin-bottom: 30px;">
             <span style="font-size: 48px;">🎉</span>
           </div>
           <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Great News! Your Book is Ready</h2>
-          <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+          <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${safeRequesterName},</p>
           <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
-            Your requested book "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} is now available in our library!
+            Your requested book "<strong style="color: #667eea;">${safeBookTitle}</strong>" by ${safeAuthor} is now available in our library!
           </p>
           <div style="text-align: center; margin: 30px 0;">
             <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
           </div>
           <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b; text-align: center;">Happy reading!<br><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
         `;
-        await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrapEmailHtml(syncEmailContent, 'Your Book is Ready'));
+        const wrappedSyncEmail = wrapEmailHtml(syncEmailContent, 'Your Book is Ready');
+        if (request.notify_on_complete) {
+          await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrappedSyncEmail);
+        }
+        await notifySubscribers(request, 'Your Book is Ready! - JcubHub Books', wrappedSyncEmail, { excludeEmails: [request.requester_email] });
       }
+
+      await notifyAdminLifecycle('completed', { ...request, cwa_book_link: cwaLink }, { cwaLink });
 
       updatedCount++;
     }
@@ -1761,26 +2736,35 @@ app.listen(PORT, () => {
           const cwaCheck = await checkCwaAvailability(request.book_title, request.author);
           
           if (cwaCheck.available && !request.cwa_available) {
-            db.prepare("UPDATE requests SET cwa_available = 1, status = 'completed', updated_at = ? WHERE id = ?").run(now, request.id);
+            const cwaLink = cwaCheck.bookLink || buildCwaSearchLink(request.book_title);
+            updateRequestCwaState(request.id, now, true, cwaLink);
+            db.prepare("UPDATE requests SET status = 'completed', updated_at = ? WHERE id = ?").run(now, request.id);
             db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
               request.id, 'completed', now, 'Auto-completed: Book found in CWA during scheduled sync'
             );
 
-            if (request.notify_on_complete) {
-              const cwaLink = process.env.CWA_URL || 'https://cwa.jcubhub.com';
+            if (request.notify_on_complete || (await getRequestSubscribers(request.id)).length > 0) {
+              const safeRequesterName = escapeHtml(request.requester_name);
+              const safeBookTitle = escapeHtml(request.book_title);
+              const safeAuthor = escapeHtml(request.author);
               const emailContent = `
                 <div style="text-align: center; margin-bottom: 30px;"><span style="font-size: 48px;">🎉</span></div>
                 <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f; text-align: center;">Your Book is Ready!</h2>
-                <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${request.requester_name},</p>
+                <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">Hi ${safeRequesterName},</p>
                 <p style="margin: 0 0 20px 0; font-size: 16px; color: #1d1d1f;">
-                  "<strong style="color: #667eea;">${request.book_title}</strong>" by ${request.author} is now available!
+                  "<strong style="color: #667eea;">${safeBookTitle}</strong>" by ${safeAuthor} is now available!
                 </p>
                 <div style="text-align: center; margin: 30px 0;">
                   <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
                 </div>
               `;
-              await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrapEmailHtml(emailContent, 'Your Book is Ready'));
+              const wrappedScheduledEmail = wrapEmailHtml(emailContent, 'Your Book is Ready');
+              if (request.notify_on_complete) {
+                await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrappedScheduledEmail);
+              }
+              await notifySubscribers(request, 'Your Book is Ready! - JcubHub Books', wrappedScheduledEmail, { excludeEmails: [request.requester_email] });
             }
+            await notifyAdminLifecycle('completed', { ...request, cwa_book_link: cwaLink }, { cwaLink });
             updatedCount++;
           }
         }

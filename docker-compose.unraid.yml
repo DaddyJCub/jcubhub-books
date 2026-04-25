@@ -27,12 +27,22 @@ services:
       # Readarr Integration (optional)
       - READARR_URL=http://readarr:8787
       - READARR_API_KEY=
+      - READARR_QUALITY_PROFILE_ID=
+      - READARR_METADATA_PROFILE_ID=
+      - READARR_ROOT_FOLDER=
       # CWA Integration (optional)
       - CWA_URL=https://cwa.jcubhub.com
       - CWA_USERNAME=
       - CWA_PASSWORD=
+      # Optional end-user send-to-eReader controls
+      - EREADER_SEND_ENABLED=false
+      - EREADER_ALLOWED_DOMAINS=
       # Webhook secret (optional)
       - WEBHOOK_SECRET=
+      # Automation
+      - AUTO_APPROVE=false
+      - AUTO_ADD_READARR=false
+      - AUTO_SYNC_INTERVAL=0
     restart: unless-stopped
     labels:
       - "net.unraid.docker.icon=https://raw.githubusercontent.com/DaddyJCub/jcubhub-books/main/backend/public/img/request.png"

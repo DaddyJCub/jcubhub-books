@@ -51,6 +51,7 @@
   <!-- Footer -->
   <div class="footer">
     <p>© 2024 JcubHub Books</p>
+    <a href="#" class="admin-link" id="trackRequestBtn">Track Request</a>
     <a href="/admin" class="admin-link">Admin</a>
   </div>
 
@@ -101,6 +102,7 @@
             <option value="epub">EPUB</option>
             <option value="pdf">PDF</option>
             <option value="mobi">MOBI</option>
+            <option value="audiobook">Audiobook</option>
             <option value="any">Any Format</option>
           </select>
         </div>
@@ -156,6 +158,31 @@
     </div>
   </div>
 
+  <!-- Request Status Popup -->
+  <div class="login-info-popup" id="statusPopup">
+    <div class="popup-content">
+      <div class="popup-icon">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-1 14H6V7h12v10z"/>
+        </svg>
+      </div>
+      <h3 class="popup-title">Track Your Request</h3>
+      <p class="popup-message" style="text-align: left;">
+        Enter your request ID and email to check current status.
+      </p>
+      <div style="display: grid; gap: 10px; margin-top: 10px;">
+        <input type="text" id="statusRequestId" placeholder="Request ID (e.g., BR-...)" style="padding: 12px; background: var(--bg-input); border: 1px solid var(--border-medium); border-radius: 10px; color: var(--text-primary);">
+        <input type="email" id="statusEmail" placeholder="Your email" style="padding: 12px; background: var(--bg-input); border: 1px solid var(--border-medium); border-radius: 10px; color: var(--text-primary);">
+        <input type="text" id="statusToken" placeholder="Status token (optional)" style="padding: 12px; background: var(--bg-input); border: 1px solid var(--border-medium); border-radius: 10px; color: var(--text-primary);">
+      </div>
+      <div id="statusResults" style="margin-top: 16px; text-align: left; color: var(--text-muted); font-size: 0.9rem;"></div>
+      <div class="popup-buttons" style="margin-top: 16px;">
+        <button class="popup-button popup-button-primary" id="checkStatusBtn">Check Status</button>
+        <button class="popup-button popup-button-secondary" id="closeStatusBtn">Close</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     // Particle generation
     function createParticles() {
@@ -177,6 +204,7 @@
     // Turnstile token and widget ID
     let turnstileToken = null;
     let turnstileWidgetId = null;
+    let lastStatusContext = null;
 
     function onTurnstileSuccess(token) {
       turnstileToken = token;
@@ -229,6 +257,201 @@
     function hideLoginInfo() {
       document.getElementById('loginInfoPopup').classList.remove('active');
       document.body.style.overflow = '';
+    }
+
+    function showStatusPopup(requestId = '', email = '', statusToken = '') {
+      document.getElementById('statusPopup').classList.add('active');
+      document.body.style.overflow = 'hidden';
+      document.getElementById('statusRequestId').value = requestId || '';
+      document.getElementById('statusEmail').value = email || '';
+      document.getElementById('statusToken').value = statusToken || '';
+      document.getElementById('statusResults').innerHTML = '';
+      lastStatusContext = null;
+    }
+
+    function hideStatusPopup() {
+      document.getElementById('statusPopup').classList.remove('active');
+      document.body.style.overflow = '';
+    }
+
+    function escapeHtml(text) {
+      if (!text) return '';
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    async function submitRequestFeedback(feedbackType) {
+      if (!lastStatusContext) return;
+      const results = document.getElementById('statusResults');
+      const messageInput = document.getElementById('statusFeedbackMessage');
+      const message = messageInput ? messageInput.value.trim() : '';
+
+      try {
+        const response = await fetch('/api/request-feedback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            requestId: lastStatusContext.requestId,
+            email: lastStatusContext.email || undefined,
+            statusToken: lastStatusContext.statusToken || undefined,
+            feedbackType,
+            message
+          })
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          results.insertAdjacentHTML('beforeend', `<div style="margin-top: 10px; color: #fca5a5;">${escapeHtml(data.error || 'Unable to save feedback.')}</div>`);
+          return;
+        }
+
+        results.insertAdjacentHTML('beforeend', '<div style="margin-top: 10px; color: #86efac;">Feedback sent. Thank you.</div>');
+      } catch (error) {
+        results.insertAdjacentHTML('beforeend', '<div style="margin-top: 10px; color: #fca5a5;">Failed to send feedback.</div>');
+      }
+    }
+
+    async function sendToEreader() {
+      if (!lastStatusContext) return;
+      const results = document.getElementById('statusResults');
+      const ereaderEmailInput = document.getElementById('ereaderEmail');
+      const ereaderEmail = ereaderEmailInput ? ereaderEmailInput.value.trim() : '';
+
+      if (!ereaderEmail) {
+        results.insertAdjacentHTML('beforeend', '<div style="margin-top: 10px; color: #fca5a5;">Enter an eReader email first.</div>');
+        return;
+      }
+
+      try {
+        const response = await fetch('/api/request-send-ereader', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            requestId: lastStatusContext.requestId,
+            email: lastStatusContext.email || undefined,
+            statusToken: lastStatusContext.statusToken || undefined,
+            ereaderEmail
+          })
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          results.insertAdjacentHTML('beforeend', `<div style="margin-top: 10px; color: #fca5a5;">${escapeHtml(data.error || 'Unable to send to eReader.')}</div>`);
+          return;
+        }
+
+        results.insertAdjacentHTML('beforeend', `<div style="margin-top: 10px; color: #86efac;">Sent to ${escapeHtml(data.sentTo)}.</div>`);
+      } catch (error) {
+        results.insertAdjacentHTML('beforeend', '<div style="margin-top: 10px; color: #fca5a5;">Failed to send to eReader.</div>');
+      }
+    }
+
+    async function checkRequestStatus() {
+      const requestId = document.getElementById('statusRequestId').value.trim();
+      const email = document.getElementById('statusEmail').value.trim();
+      const statusToken = document.getElementById('statusToken').value.trim();
+      const results = document.getElementById('statusResults');
+
+      if (!statusToken && (!requestId || !email)) {
+        results.innerHTML = '<div style="color: #fca5a5;">Provide status token OR request ID + email.</div>';
+        return;
+      }
+
+      results.innerHTML = '<div style="color: var(--text-muted);">Checking status...</div>';
+
+      try {
+        const payload = statusToken
+          ? { statusToken, requestId: requestId || undefined, email: email || undefined }
+          : { requestId, email };
+
+        const response = await fetch('/api/request-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          results.innerHTML = `<div style="color: #fca5a5;">${escapeHtml(data.error || 'Unable to lookup request.')}</div>`;
+          return;
+        }
+
+        const historyHtml = (data.history || []).map(item => `
+          <div style="padding: 8px 0; border-bottom: 1px solid var(--border-light);">
+            <div style="font-weight: 600; text-transform: capitalize;">${escapeHtml(item.status)}</div>
+            <div style="font-size: 0.8rem; color: var(--text-muted);">${new Date(item.changed_at).toLocaleString()}</div>
+            ${item.notes ? `<div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 4px;">${escapeHtml(item.notes)}</div>` : ''}
+          </div>
+        `).join('');
+
+        const monitoringHtml = data.monitoring ? `
+          <div style="margin-top: 12px; background: rgba(148, 163, 184, 0.12); border: 1px solid rgba(148, 163, 184, 0.35); border-radius: 10px; padding: 12px;">
+            <div style="font-size: 0.85rem; color: var(--text-muted);">Monitored Match</div>
+            <div style="font-weight: 600; margin-top: 4px;">${escapeHtml(data.monitoring.selectedTitle || '')}</div>
+            <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 4px;">${escapeHtml(data.monitoring.selectedAuthor || '')}${data.monitoring.selectedReleaseDate ? ` • ${escapeHtml(data.monitoring.selectedReleaseDate)}` : ''}</div>
+            <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 6px;">Readarr ID: ${escapeHtml(data.monitoring.readarrBookId || 'N/A')} ${data.monitoring.foreignBookId ? `| Foreign: ${escapeHtml(data.monitoring.foreignBookId)}` : ''}</div>
+          </div>
+        ` : '';
+
+        const downloadHtml = data.downloadLink ? `
+          <div style="margin-top: 12px; display: grid; gap: 10px;">
+            <a href="${escapeHtml(data.downloadLink)}" target="_blank" rel="noopener noreferrer" class="submit-button" style="display:inline-block; text-decoration:none; text-align:center;">
+              Open Download in CWA
+            </a>
+            <div style="display:grid; gap:8px;">
+              <input type="email" id="ereaderEmail" placeholder="eReader email (e.g., kindle address)" style="padding: 10px; background: var(--bg-input); border: 1px solid var(--border-medium); border-radius: 10px; color: var(--text-primary);">
+              <button type="button" class="popup-button popup-button-secondary" id="sendEreaderBtn">Send to eReader</button>
+            </div>
+          </div>
+        ` : '';
+
+        const feedbackHtml = data.monitoring ? `
+          <div style="margin-top: 12px; display:grid; gap:8px;">
+            <input type="text" id="statusFeedbackMessage" placeholder="Optional note for admin" style="padding: 10px; background: var(--bg-input); border: 1px solid var(--border-medium); border-radius: 10px; color: var(--text-primary);">
+            <div style="display:flex; gap:8px;">
+              <button type="button" class="popup-button popup-button-secondary" id="confirmMatchBtn" style="flex:1;">Looks Correct</button>
+              <button type="button" class="popup-button popup-button-secondary" id="reportMismatchBtn" style="flex:1;">Report Wrong Match</button>
+            </div>
+          </div>
+        ` : '';
+
+        results.innerHTML = `
+          <div style="background: rgba(102, 126, 234, 0.12); border: 1px solid rgba(102, 126, 234, 0.35); border-radius: 10px; padding: 12px;">
+            <div style="font-size: 0.85rem; color: var(--text-muted);">Request</div>
+            <div style="font-weight: 600;">${escapeHtml(data.id)}</div>
+            <div style="margin-top: 8px; font-size: 0.9rem;">${escapeHtml(data.bookTitle)} by ${escapeHtml(data.author)}</div>
+            <div style="margin-top: 8px;">
+              <span style="display: inline-block; background: rgba(34, 197, 94, 0.2); color: #86efac; padding: 4px 10px; border-radius: 999px; font-size: 0.8rem; text-transform: capitalize;">${escapeHtml(data.status)}</span>
+            </div>
+          </div>
+          ${monitoringHtml}
+          ${downloadHtml}
+          ${feedbackHtml}
+          <div style="margin-top: 12px; max-height: 220px; overflow-y: auto;">${historyHtml || '<div style="color: var(--text-muted);">No status history yet.</div>'}</div>
+        `;
+
+        lastStatusContext = {
+          requestId: data.id,
+          email: email || '',
+          statusToken: data.statusToken || statusToken || ''
+        };
+
+        const confirmMatchBtn = document.getElementById('confirmMatchBtn');
+        const reportMismatchBtn = document.getElementById('reportMismatchBtn');
+        const sendEreaderBtn = document.getElementById('sendEreaderBtn');
+        if (confirmMatchBtn) {
+          confirmMatchBtn.addEventListener('click', () => submitRequestFeedback('match_confirmed'));
+        }
+        if (reportMismatchBtn) {
+          reportMismatchBtn.addEventListener('click', () => submitRequestFeedback('match_mismatch'));
+        }
+        if (sendEreaderBtn) {
+          sendEreaderBtn.addEventListener('click', sendToEreader);
+        }
+      } catch (error) {
+        results.innerHTML = '<div style="color: #fca5a5;">Failed to check status. Please try again.</div>';
+      }
     }
 
     function goToLibrary() {
@@ -317,10 +540,54 @@
             }, 8000);
             return;
           }
+
+          // Matching active request exists - user was subscribed to that request
+          if (result.subscribedToExisting) {
+            const formGroups = form.querySelectorAll('.form-group, .turnstile-container, .submit-button');
+            formGroups.forEach(el => el.style.display = 'none');
+            successMessage.innerHTML = `
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor" style="color: var(--success); margin-bottom: 10px;">
+                <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+              </svg>
+              <p style="font-size: 1.1rem; font-weight: 600; color: var(--success);">Subscribed to existing request</p>
+              ${result.requestId ? `<p style="margin-top: 8px; font-size: 0.9rem;">Request ID: <strong>${result.requestId}</strong></p>` : ''}
+              ${result.statusToken ? `<p style="margin-top: 6px; font-size: 0.8rem; color: var(--text-muted);">Status token: <strong>${result.statusToken}</strong></p>` : ''}
+              ${result.status ? `<p style="margin-top: 6px; font-size: 0.9rem; color: var(--text-muted); text-transform: capitalize;">Current status: ${result.status}</p>` : ''}
+              <p style="margin-top: 10px; font-size: 0.9rem; color: var(--text-muted);">You'll receive updates as this request moves forward.</p>
+              <button type="button" class="submit-button" id="openTrackingFromSuccess" style="margin-top: 16px;">
+                Track This Request
+              </button>
+            `;
+            successMessage.classList.add('show');
+
+            const openTrackingBtn = document.getElementById('openTrackingFromSuccess');
+            const autoCloseTimer = setTimeout(() => {
+              hideRequestForm();
+              formGroups.forEach(el => el.style.display = '');
+            }, 8000);
+
+            if (openTrackingBtn) {
+              openTrackingBtn.addEventListener('click', () => {
+                clearTimeout(autoCloseTimer);
+                hideRequestForm();
+                showStatusPopup(result.requestId || '', formData.requesterEmail || '', result.statusToken || '');
+              });
+            }
+            return;
+          }
           
           // Normal success - request submitted
           const formGroups = form.querySelectorAll('.form-group, .turnstile-container, .submit-button');
           formGroups.forEach(el => el.style.display = 'none');
+          successMessage.innerHTML = `
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor" style="color: var(--success); margin-bottom: 10px;">
+              <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+            </svg>
+            <p>Your book request has been submitted successfully!</p>
+            ${result.requestId ? `<p style="margin-top: 8px; font-size: 0.9rem;">Request ID: <strong>${result.requestId}</strong></p>` : ''}
+            ${result.statusToken ? `<p style="margin-top: 6px; font-size: 0.8rem; color: var(--text-muted);">Status token: <strong>${result.statusToken}</strong></p>` : ''}
+            <p style="margin-top: 10px; font-size: 0.9rem; color: var(--text-muted);">We'll review your request and notify you when the book is available.</p>
+          `;
           successMessage.classList.add('show');
           
           // Auto-close after 5 seconds
@@ -386,6 +653,7 @@
       if (e.key === 'Escape') {
         hideRequestForm();
         hideLoginInfo();
+        hideStatusPopup();
       }
     });
 
@@ -402,6 +670,12 @@
       }
     });
 
+    document.getElementById('statusPopup').addEventListener('click', function(e) {
+      if (e.target === this) {
+        hideStatusPopup();
+      }
+    });
+
     // Event listeners for interactive elements (CSP-compliant)
     document.getElementById('requestCard').addEventListener('click', showRequestForm);
     document.getElementById('downloadCard').addEventListener('click', showLoginInfo);
@@ -409,6 +683,12 @@
     document.getElementById('requestForm').addEventListener('submit', submitRequest);
     document.getElementById('goToLibraryBtn').addEventListener('click', goToLibrary);
     document.getElementById('cancelLoginBtn').addEventListener('click', hideLoginInfo);
+    document.getElementById('trackRequestBtn').addEventListener('click', function(e) {
+      e.preventDefault();
+      showStatusPopup();
+    });
+    document.getElementById('checkStatusBtn').addEventListener('click', checkRequestStatus);
+    document.getElementById('closeStatusBtn').addEventListener('click', hideStatusPopup);
   </script>
 </body>
 </html>

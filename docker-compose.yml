@@ -25,9 +25,17 @@ services:
       # - TURNSTILE_SECRET_KEY=
       # - READARR_URL=
       # - READARR_API_KEY=
+      # - READARR_QUALITY_PROFILE_ID=
+      # - READARR_METADATA_PROFILE_ID=
+      # - READARR_ROOT_FOLDER=
       # - CWA_URL=
       # - CWA_USERNAME=
       # - CWA_PASSWORD=
+      # - EREADER_SEND_ENABLED=false
+      # - EREADER_ALLOWED_DOMAINS=
+      # - AUTO_APPROVE=false
+      # - AUTO_ADD_READARR=false
+      # - AUTO_SYNC_INTERVAL=0
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3003/api/health"]
