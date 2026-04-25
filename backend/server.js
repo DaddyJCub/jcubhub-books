@@ -159,16 +159,6 @@ function initDatabase() {
       password_hash TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
-
-    CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
-    CREATE INDEX IF NOT EXISTS idx_requests_email ON requests(requester_email);
-    CREATE INDEX IF NOT EXISTS idx_requests_readarr_book_id ON requests(readarr_book_id);
-    CREATE INDEX IF NOT EXISTS idx_requests_readarr_foreign_book_id ON requests(readarr_foreign_book_id);
-    CREATE INDEX IF NOT EXISTS idx_requests_status_token ON requests(status_token);
-    CREATE INDEX IF NOT EXISTS idx_requests_cwa_book_link ON requests(cwa_book_link);
-    CREATE INDEX IF NOT EXISTS idx_request_subscribers_request_id ON request_subscribers(request_id);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_request_subscribers_unique_email ON request_subscribers(request_id, subscriber_email);
-    CREATE INDEX IF NOT EXISTS idx_status_history_request ON status_history(request_id);
   `);
 
   // Migration: Add ISBN column if it doesn't exist (for existing databases)
@@ -189,6 +179,7 @@ function initDatabase() {
     { name: 'readarr_selected_release_date', sql: 'ALTER TABLE requests ADD COLUMN readarr_selected_release_date TEXT' },
     { name: 'last_readarr_error', sql: 'ALTER TABLE requests ADD COLUMN last_readarr_error TEXT' },
     { name: 'status_token', sql: 'ALTER TABLE requests ADD COLUMN status_token TEXT' },
+    { name: 'cwa_available', sql: 'ALTER TABLE requests ADD COLUMN cwa_available INTEGER DEFAULT 0' },
     { name: 'cwa_book_link', sql: 'ALTER TABLE requests ADD COLUMN cwa_book_link TEXT' }
   ];
 
@@ -198,6 +189,26 @@ function initDatabase() {
       logger.info('Migration: Added column to requests table', { column: column.name });
     } catch (e) {
       // Column already exists, ignore
+    }
+  }
+
+  const indexes = [
+    { name: 'idx_requests_status', sql: 'CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status)' },
+    { name: 'idx_requests_email', sql: 'CREATE INDEX IF NOT EXISTS idx_requests_email ON requests(requester_email)' },
+    { name: 'idx_requests_readarr_book_id', sql: 'CREATE INDEX IF NOT EXISTS idx_requests_readarr_book_id ON requests(readarr_book_id)' },
+    { name: 'idx_requests_readarr_foreign_book_id', sql: 'CREATE INDEX IF NOT EXISTS idx_requests_readarr_foreign_book_id ON requests(readarr_foreign_book_id)' },
+    { name: 'idx_requests_status_token', sql: 'CREATE INDEX IF NOT EXISTS idx_requests_status_token ON requests(status_token)' },
+    { name: 'idx_requests_cwa_book_link', sql: 'CREATE INDEX IF NOT EXISTS idx_requests_cwa_book_link ON requests(cwa_book_link)' },
+    { name: 'idx_request_subscribers_request_id', sql: 'CREATE INDEX IF NOT EXISTS idx_request_subscribers_request_id ON request_subscribers(request_id)' },
+    { name: 'idx_request_subscribers_unique_email', sql: 'CREATE UNIQUE INDEX IF NOT EXISTS idx_request_subscribers_unique_email ON request_subscribers(request_id, subscriber_email)' },
+    { name: 'idx_status_history_request', sql: 'CREATE INDEX IF NOT EXISTS idx_status_history_request ON status_history(request_id)' }
+  ];
+
+  for (const index of indexes) {
+    try {
+      db.exec(index.sql);
+    } catch (e) {
+      logger.warn('Could not create index', { index: index.name, error: e.message });
     }
   }
 
