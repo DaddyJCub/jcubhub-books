@@ -653,10 +653,46 @@ async function checkCwaAvailability(bookTitle, author) {
   }
 }
 
-async function searchReadarr(bookTitle, author, isbn) {
+async function searchReadarr(bookTitle, author, isbn, options = {}) {
   if (!process.env.READARR_URL || !process.env.READARR_API_KEY) {
     return null;
   }
+
+  const preferredFormat = String(options.preferredFormat || 'any').toLowerCase();
+  const excludeAudiobook = options.excludeAudiobook === true;
+  const excludeForeignBookId = String(options.excludeForeignBookId || '').trim();
+
+  const isLikelyAudiobookResult = book => {
+    const audioRegex = /\b(audiobook|audio\s*book|audio)\b/i;
+    const textRegex = /\b(ebook|e-book|epub|mobi|pdf|hardcover|paperback|print|book)\b/i;
+
+    const primaryFields = [
+      book?.bookType,
+      book?.type,
+      book?.mediaType,
+      book?.bookFormat,
+      book?.releaseType
+    ].filter(Boolean).map(v => String(v));
+
+    const editionFields = Array.isArray(book?.editions)
+      ? book.editions.flatMap(edition => [
+          edition?.format,
+          edition?.bookFormat,
+          edition?.mediaType,
+          edition?.releaseType,
+          edition?.title,
+          edition?.moniker
+        ]).filter(Boolean).map(v => String(v))
+      : [];
+
+    const candidates = primaryFields.concat(editionFields);
+    const hasAudio = candidates.some(value => audioRegex.test(value));
+    const hasText = candidates.some(value => textRegex.test(value));
+
+    if (hasAudio && !hasText) return true;
+    if (!hasAudio && !hasText) return audioRegex.test(String(book?.title || ''));
+    return false;
+  };
 
   try {
     // Use ISBN if available for more accurate search
@@ -682,7 +718,8 @@ async function searchReadarr(bookTitle, author, isbn) {
     const topResults = books.slice(0, 3).map(b => ({
       title: b.title,
       author: b.authorName,
-      foreignBookId: b.foreignBookId
+      foreignBookId: b.foreignBookId,
+      likelyAudiobook: isLikelyAudiobookResult(b)
     }));
     logger.info('Readarr search results', { 
       searchQuery: rawQuery, 
@@ -700,6 +737,7 @@ async function searchReadarr(bookTitle, author, isbn) {
     const scored = books.map(book => {
       const bookTitleLower = (book.title || '').toLowerCase();
       const bookAuthorLower = (book.authorName || '').toLowerCase();
+      const likelyAudiobook = isLikelyAudiobookResult(book);
       let score = 0;
       
       // Exact title match (highest priority)
@@ -731,19 +769,48 @@ async function searchReadarr(bookTitle, author, isbn) {
           normalizedSearchAuthor.includes(bookAuthorLower))) {
         score += 20;
       }
+
+      if (preferredFormat === 'audiobook') {
+        if (likelyAudiobook) {
+          score += 35;
+        } else {
+          score -= 15;
+        }
+      } else if (likelyAudiobook) {
+        score -= 80;
+      }
       
-      return { book, score };
+      return { book, score, likelyAudiobook };
     });
     
     // Sort by score descending and return best match
     scored.sort((a, b) => b.score - a.score);
+
+    let candidates = scored;
+
+    if (excludeForeignBookId) {
+      const filteredByForeignId = candidates.filter(item => String(item.book?.foreignBookId || '') !== excludeForeignBookId);
+      if (filteredByForeignId.length > 0) {
+        candidates = filteredByForeignId;
+      }
+    }
+
+    if (excludeAudiobook) {
+      const nonAudiobook = candidates.filter(item => !item.likelyAudiobook);
+      if (nonAudiobook.length > 0) {
+        candidates = nonAudiobook;
+      }
+    }
     
-    const bestMatch = scored[0];
+    const bestMatch = candidates[0] || scored[0];
     logger.info('Readarr best match selected', { 
       searchTitle: bookTitle,
       selectedTitle: bestMatch.book.title,
       score: bestMatch.score,
-      wasFirst: bestMatch.book === books[0]
+      likelyAudiobook: bestMatch.likelyAudiobook,
+      wasFirst: bestMatch.book === books[0],
+      preferredFormat,
+      excludeAudiobook
     });
     
     return bestMatch.book;
@@ -1057,8 +1124,15 @@ async function addBookToReadarr(bookData) {
   }
 
   try {
+    const requestedFormat = String(bookData.format || 'any').toLowerCase();
+
     // First search for the book (use ISBN if available for accuracy)
-    const searchResult = await searchReadarr(bookData.bookTitle, bookData.author, bookData.isbn);
+    const searchResult = bookData._forcedSearchResult || await searchReadarr(
+      bookData.bookTitle,
+      bookData.author,
+      bookData.isbn,
+      { preferredFormat: requestedFormat }
+    );
     if (!searchResult) {
       return { success: false, error: 'Book not found in Readarr' };
     }
@@ -1091,6 +1165,7 @@ async function addBookToReadarr(bookData) {
       foreignAuthorId: searchResult.author?.foreignAuthorId,
       foreignBookId: searchResult.foreignBookId,
       bookTitle: searchResult.title,
+      requestedFormat,
       editions: searchResult.editions?.length || 0
     });
 
@@ -1229,6 +1304,42 @@ async function addBookToReadarr(bookData) {
         status: response.status,
         error: errorMessage 
       });
+
+      const audiobookProfileError = /audiobook metadata profile is not set/i.test(errorMessage || '');
+      const canRetryNonAudiobook = audiobookProfileError && requestedFormat !== 'audiobook' && !bookData._audioRetryAttempted;
+
+      if (canRetryNonAudiobook) {
+        logger.warn('Retrying Readarr add with non-audiobook candidate', {
+          bookTitle: bookData.bookTitle,
+          requestedFormat,
+          previousForeignBookId: searchResult.foreignBookId || null
+        });
+
+        const alternateSearchResult = await searchReadarr(
+          bookData.bookTitle,
+          bookData.author,
+          bookData.isbn,
+          {
+            preferredFormat: requestedFormat,
+            excludeAudiobook: true,
+            excludeForeignBookId: searchResult.foreignBookId || ''
+          }
+        );
+
+        const previousForeignBookId = String(searchResult.foreignBookId || '').trim();
+        const alternateForeignBookId = String(alternateSearchResult?.foreignBookId || '').trim();
+        const hasDistinctAlternate = !!alternateSearchResult && (!!alternateForeignBookId || !!alternateSearchResult.id) &&
+          (alternateForeignBookId !== previousForeignBookId || alternateSearchResult.id !== searchResult.id);
+
+        if (hasDistinctAlternate) {
+          return addBookToReadarr({
+            ...bookData,
+            _forcedSearchResult: alternateSearchResult,
+            _audioRetryAttempted: true
+          });
+        }
+      }
+
       return { success: false, error: errorMessage, statusCode: response.status };
     }
   } catch (error) {
