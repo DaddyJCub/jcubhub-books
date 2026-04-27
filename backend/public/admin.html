@@ -603,7 +603,10 @@
             <input type="checkbox" id="testAttemptAdd" style="width: 16px; height: 16px;">
             Attempt live add test (posts to Readarr and may add the book)
           </label>
-          <button class="btn btn-primary" id="runReadarrTestBtn">🧪 Run Diagnostics</button>
+          <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+            <button class="btn btn-primary" id="runReadarrTestBtn">🧪 Run Diagnostics</button>
+            <button class="btn btn-secondary" id="downloadReadarrSnapshotBtn">🛰️ Download API Snapshot</button>
+          </div>
         </div>
         <div id="readarrTestResults"></div>
       </div>
@@ -1023,12 +1026,22 @@
             </div>
           `;
         }
+
+        html += `
+          <details style="margin-top: 15px; border: 1px solid var(--border-light); border-radius: 12px; padding: 10px;">
+            <summary style="cursor: pointer; color: var(--text-primary); font-weight: 600;">Raw Diagnostics JSON</summary>
+            <textarea id="readarrJsonOutput" readonly style="margin-top: 10px; width: 100%; min-height: 220px; resize: vertical; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); border-radius: 8px; color: var(--text-primary); padding: 10px; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px;"></textarea>
+          </details>
+        `;
         
         // Add copy button
         html += `
           <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--border-light); display: flex; justify-content: space-between; align-items: center;">
             <span style="font-size: 12px; color: var(--text-muted);">💡 Full results logged to browser console (F12)</span>
-            <button class="btn btn-secondary" onclick="copyReadarrResults()" style="font-size: 12px; padding: 8px 16px;">📋 Copy JSON</button>
+            <div style="display: flex; gap: 8px;">
+              <button class="btn btn-secondary" onclick="copyReadarrResults()" style="font-size: 12px; padding: 8px 16px;">📋 Copy JSON</button>
+              <button class="btn btn-secondary" onclick="downloadReadarrResults()" style="font-size: 12px; padding: 8px 16px;">💾 Download JSON</button>
+            </div>
           </div>
         `;
         
@@ -1036,6 +1049,11 @@
         
         // Store for copying
         window.lastReadarrTestResult = result;
+
+        const jsonOutput = document.getElementById('readarrJsonOutput');
+        if (jsonOutput) {
+          jsonOutput.value = JSON.stringify(result, null, 2);
+        }
         
       } catch (error) {
         resultsDiv.innerHTML = `
@@ -1044,6 +1062,52 @@
             <p style="color: #fca5a5; margin-top: 10px;">Error: ${error.message}</p>
           </div>
         `;
+      }
+    }
+
+    async function downloadReadarrApiSnapshot() {
+      const requestId = document.getElementById('testRequestId').value.trim();
+      const title = document.getElementById('testTitle').value.trim();
+      const author = document.getElementById('testAuthor').value.trim();
+      const isbn = document.getElementById('testIsbn').value.trim();
+      const format = document.getElementById('testFormat').value;
+      const includeLookup = !!requestId || (!!title && !!author);
+
+      showToast('Building API snapshot...', '');
+
+      try {
+        const response = await apiCall('/api/admin/readarr/snapshot', {
+          method: 'POST',
+          body: JSON.stringify({
+            requestId,
+            title,
+            author,
+            isbn,
+            format,
+            includeLookup
+          })
+        });
+
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+          showToast(result.error || result.message || 'Failed to build API snapshot', 'error');
+          return;
+        }
+
+        const jsonText = JSON.stringify(result, null, 2);
+        const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `readarr-api-snapshot-${Date.now()}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        showToast('API snapshot downloaded', 'success');
+      } catch (error) {
+        showToast('Failed to build API snapshot', 'error');
       }
     }
     
@@ -1087,6 +1151,29 @@
           .catch(() => fallbackCopy());
       } else {
         fallbackCopy();
+      }
+    }
+
+    function downloadReadarrResults() {
+      if (!window.lastReadarrTestResult) {
+        showToast('No results to download', 'error');
+        return;
+      }
+
+      try {
+        const jsonText = JSON.stringify(window.lastReadarrTestResult, null, 2);
+        const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `readarr-diagnostics-${Date.now()}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showToast('Diagnostics JSON downloaded', 'success');
+      } catch {
+        showToast('Download failed', 'error');
       }
     }
 
@@ -1618,6 +1705,7 @@
     document.getElementById('testReadarrBtn')?.addEventListener('click', testReadarr);
     document.getElementById('readarrTestCloseBtn')?.addEventListener('click', closeReadarrTestModal);
     document.getElementById('runReadarrTestBtn')?.addEventListener('click', runReadarrTest);
+    document.getElementById('downloadReadarrSnapshotBtn')?.addEventListener('click', downloadReadarrApiSnapshot);
     
     // Enter key in test modal
     document.getElementById('testIsbn')?.addEventListener('keypress', (e) => {

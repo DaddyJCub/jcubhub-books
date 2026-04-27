@@ -1208,26 +1208,48 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
     .replace(/\s+/g, ' ')
     .trim();
 
-  const authorForBook = searchResult.author ? {
-    ...searchResult.author,
-    qualityProfileId,
-    metadataProfileId,
-    rootFolderPath,
-    ebookQualityProfileId: qualityProfileId,
-    ebookMetadataProfileId: metadataProfileId,
-    ebookRootFolderPath: rootFolderPath,
-    audiobookMonitored: audiobookSelected,
-    ebookMonitored: ebookSelected,
-    audiobookMonitorExisting: audiobookSelected ? 2 : 0,
-    audiobookMonitorFuture: audiobookSelected,
-    ebookMonitorExisting: ebookSelected ? 2 : 0,
-    ebookMonitorFuture: ebookSelected,
-    lastSelectedMediaType: payloadMediaType,
-    path: `${rootFolderPath}/${safeAuthorFolder}`,
-    monitored: true
-  } : null;
+  const authorId = parsePositiveInt(searchResult.author?.id) || 0;
+  let authorForBook = null;
 
-  const authorId = searchResult.author?.id || 0;
+  if (searchResult.author) {
+    const baseAuthor = authorId > 0
+      ? {
+          id: authorId,
+          authorName: searchResult.author?.authorName || searchResult.authorName || null,
+          foreignAuthorId: searchResult.author?.foreignAuthorId || null
+        }
+      : {
+          ...searchResult.author,
+          path: `${rootFolderPath}/${safeAuthorFolder}`
+        };
+
+    authorForBook = {
+      ...baseAuthor,
+      qualityProfileId,
+      metadataProfileId,
+      rootFolderPath,
+      ebookQualityProfileId: qualityProfileId,
+      ebookMetadataProfileId: metadataProfileId,
+      ebookRootFolderPath: rootFolderPath,
+      audiobookMonitored: audiobookSelected,
+      ebookMonitored: ebookSelected,
+      audiobookMonitorExisting: audiobookSelected ? 2 : 0,
+      audiobookMonitorFuture: audiobookSelected,
+      ebookMonitorExisting: ebookSelected ? 2 : 0,
+      ebookMonitorFuture: ebookSelected,
+      lastSelectedMediaType: payloadMediaType,
+      monitored: true
+    };
+
+    if (ebookSelected) {
+      delete authorForBook.audiobookRootFolderPath;
+      delete authorForBook.audiobookQualityProfileId;
+      delete authorForBook.audiobookMetadataProfileId;
+      delete authorForBook.narratorProfileId;
+      delete authorForBook.audiobookTags;
+    }
+  }
+
   const bookToAdd = {
     ...sanitizedSearchResult,
     qualityProfileId,
@@ -1247,9 +1269,20 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
       addType: 'manual',
       searchForNewBook: true,
       monitor: 'all',
-      addNewAuthor: true
+      addNewAuthor: authorId === 0
     }
   };
+
+  if (ebookSelected) {
+    delete bookToAdd.audiobookRootFolderPath;
+    delete bookToAdd.audiobookQualityProfileId;
+    delete bookToAdd.audiobookMetadataProfileId;
+    delete bookToAdd.narratorProfileId;
+    delete bookToAdd.availableNarrators;
+    delete bookToAdd.narratorEntity;
+    delete bookToAdd.narratorNames;
+    delete bookToAdd.isWantedNarrator;
+  }
 
   return {
     bookToAdd,
@@ -2573,6 +2606,311 @@ app.get('/api/admin/readarr/search', authenticateToken, async (req, res) => {
 
   const result = await searchReadarr(title || '', author || '');
   res.json({ results: result ? [result] : [] });
+});
+
+// Downloadable API snapshot for troubleshooting Readarr/Chaptarr compatibility
+app.post('/api/admin/readarr/snapshot', authenticateToken, async (req, res) => {
+  const {
+    title,
+    author,
+    isbn,
+    format,
+    requestId,
+    includeLookup,
+    forceRefreshConfig
+  } = req.body || {};
+
+  if (!process.env.READARR_URL || !process.env.READARR_API_KEY) {
+    return res.status(400).json({ success: false, error: 'Readarr not configured' });
+  }
+
+  let sourceRequest = null;
+  if (requestId) {
+    sourceRequest = db.prepare('SELECT * FROM requests WHERE id = ?').get(requestId);
+    if (!sourceRequest) {
+      return res.status(404).json({ success: false, error: 'Request not found' });
+    }
+  }
+
+  const effectiveTitle = String(sourceRequest?.book_title || title || '').trim();
+  const effectiveAuthor = String(sourceRequest?.author || author || '').trim();
+  const effectiveIsbn = String(sourceRequest?.isbn || isbn || '').trim();
+  const effectiveFormat = String(sourceRequest?.format || format || 'any').toLowerCase();
+  const shouldIncludeLookup = includeLookup !== false && !!effectiveTitle && !!effectiveAuthor;
+
+  const headers = { 'X-Api-Key': process.env.READARR_API_KEY };
+
+  const safeFetchJson = async (endpoint, label) => {
+    const url = `${process.env.READARR_URL}${endpoint}`;
+    try {
+      const response = await fetchWithTimeout(url, { headers }, label);
+      const rawText = await response.text();
+      let data = null;
+      try {
+        data = rawText ? JSON.parse(rawText) : null;
+      } catch {
+        data = null;
+      }
+
+      return {
+        ok: response.ok,
+        statusCode: response.status,
+        statusText: response.statusText,
+        data,
+        bodyPreview: rawText?.substring(0, 1200) || ''
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        statusCode: 0,
+        statusText: 'request_error',
+        error: error.message
+      };
+    }
+  };
+
+  const [
+    statusInfo,
+    routesInfo,
+    qualityProfilesInfo,
+    metadataProfilesInfo,
+    rootFoldersInfo
+  ] = await Promise.all([
+    safeFetchJson('/api/v1/system/status', 'Readarr system status snapshot'),
+    safeFetchJson('/api/v1/system/routes', 'Readarr system routes snapshot'),
+    safeFetchJson('/api/v1/qualityprofile', 'Readarr quality profiles snapshot'),
+    safeFetchJson('/api/v1/metadataprofile', 'Readarr metadata profiles snapshot'),
+    safeFetchJson('/api/v1/rootfolder', 'Readarr root folders snapshot')
+  ]);
+
+  const qualityProfiles = Array.isArray(qualityProfilesInfo.data) ? qualityProfilesInfo.data : [];
+  const metadataProfiles = Array.isArray(metadataProfilesInfo.data) ? metadataProfilesInfo.data : [];
+  const rootFolders = Array.isArray(rootFoldersInfo.data) ? rootFoldersInfo.data : [];
+
+  const fallbackConfig = {
+    qualityProfiles,
+    metadataProfiles,
+    rootFolders
+  };
+
+  let readarrConfig = fallbackConfig;
+  try {
+    readarrConfig = await getReadarrConfig(forceRefreshConfig === true);
+  } catch (error) {
+    logger.warn('Could not refresh cached Readarr config for snapshot, using direct API response', { error: error.message });
+  }
+
+  const qualityProfileId = (readarrConfig.qualityProfiles?.length || 0) > 0
+    ? selectQualityProfileId(effectiveFormat, readarrConfig.qualityProfiles)
+    : null;
+  const metadataProfileId = (readarrConfig.metadataProfiles?.length || 0) > 0
+    ? selectMetadataProfileId(effectiveFormat, readarrConfig.metadataProfiles)
+    : null;
+  const rootFolderPath = (readarrConfig.rootFolders?.length || 0) > 0
+    ? selectRootFolderPath(effectiveFormat, readarrConfig.rootFolders)
+    : null;
+
+  const routesRaw = routesInfo.data;
+  const routePaths = Array.isArray(routesRaw)
+    ? routesRaw
+        .map(route => {
+          if (typeof route === 'string') return route;
+          if (route && typeof route.path === 'string') return route.path;
+          if (route && typeof route.route === 'string') return route.route;
+          return null;
+        })
+        .filter(Boolean)
+    : [];
+
+  const routeSummary = {
+    total: routePaths.length,
+    sample: routePaths.slice(0, 50),
+    capabilities: {
+      hasBookLookup: routePaths.some(path => /\/book\/lookup/i.test(path)),
+      hasBookAdd: routePaths.some(path => /\/book$/i.test(path)),
+      hasQualityProfiles: routePaths.some(path => /\/qualityprofile/i.test(path)),
+      hasMetadataProfiles: routePaths.some(path => /\/metadataprofile/i.test(path)),
+      hasRootFolders: routePaths.some(path => /\/rootfolder/i.test(path)),
+      hasCommand: routePaths.some(path => /\/command/i.test(path))
+    }
+  };
+
+  let lookup = {
+    included: false,
+    query: null,
+    totalResults: 0,
+    topResults: [],
+    payloadPreview: null
+  };
+
+  if (shouldIncludeLookup) {
+    const rawQuery = effectiveIsbn || `${effectiveAuthor} ${effectiveTitle}`;
+    const lookupInfo = await safeFetchJson(`/api/v1/book/lookup?term=${encodeURIComponent(rawQuery)}`, 'Readarr lookup snapshot');
+
+    const rawBooks = Array.isArray(lookupInfo.data) ? lookupInfo.data : [];
+    const normalizedSearchTitle = effectiveTitle.toLowerCase().trim();
+    const normalizedSearchAuthor = effectiveAuthor.toLowerCase().trim();
+
+    const scoredEntries = rawBooks.map(book => {
+      const details = scoreReadarrLookupResult(book, normalizedSearchTitle, normalizedSearchAuthor, effectiveFormat);
+      return {
+        book,
+        score: details.score,
+        likelyAudiobook: details.likelyAudiobook,
+        scoreBreakdown: details.scoreBreakdown
+      };
+    }).sort((a, b) => b.score - a.score);
+
+    let payloadPreview = null;
+    if (scoredEntries[0] && readarrConfig.qualityProfiles?.length && readarrConfig.metadataProfiles?.length && readarrConfig.rootFolders?.length) {
+      const payload = buildReadarrBookPayload(scoredEntries[0].book, effectiveFormat, readarrConfig, {
+        stripAudiobookMetadata: effectiveFormat !== 'audiobook'
+      });
+
+      payloadPreview = {
+        mediaType: payload.bookToAdd.mediaType || null,
+        selectedTitle: payload.bookToAdd.title || null,
+        selectedForeignBookId: payload.bookToAdd.foreignBookId || null,
+        authorId: payload.bookToAdd.authorId || null,
+        addOptions: payload.bookToAdd.addOptions || null,
+        profileSelection: {
+          qualityProfileId: payload.bookToAdd.qualityProfileId || null,
+          metadataProfileId: payload.bookToAdd.metadataProfileId || null,
+          ebookQualityProfileId: payload.bookToAdd.ebookQualityProfileId || null,
+          ebookMetadataProfileId: payload.bookToAdd.ebookMetadataProfileId || null
+        },
+        rootFolders: {
+          rootFolderPath: payload.bookToAdd.rootFolderPath || null,
+          ebookRootFolderPath: payload.bookToAdd.ebookRootFolderPath || null,
+          audiobookRootFolderPath: payload.bookToAdd.audiobookRootFolderPath || null
+        },
+        audiobookFlags: {
+          likelyAudiobook: isLikelyAudiobookResult(scoredEntries[0].book),
+          audiobookMonitored: payload.bookToAdd.audiobookMonitored,
+          ebookMonitored: payload.bookToAdd.ebookMonitored
+        }
+      };
+    }
+
+    lookup = {
+      included: true,
+      query: rawQuery,
+      totalResults: rawBooks.length,
+      lookupStatus: {
+        ok: lookupInfo.ok,
+        statusCode: lookupInfo.statusCode,
+        statusText: lookupInfo.statusText
+      },
+      topResults: scoredEntries.slice(0, 5).map(entry => ({
+        title: entry.book.title,
+        author: entry.book.authorName,
+        foreignBookId: entry.book.foreignBookId,
+        mediaType: entry.book.mediaType || null,
+        score: entry.score,
+        likelyAudiobook: entry.likelyAudiobook,
+        scoreBreakdown: entry.scoreBreakdown
+      })),
+      payloadPreview
+    };
+  }
+
+  const selectedQuality = (readarrConfig.qualityProfiles || []).find(p => p.id === qualityProfileId) || null;
+  const selectedMetadata = (readarrConfig.metadataProfiles || []).find(p => p.id === metadataProfileId) || null;
+
+  const recommendations = [];
+  if (effectiveFormat !== 'audiobook' && /\baudio\b/i.test(String(selectedMetadata?.name || ''))) {
+    recommendations.push('Selected metadata profile appears audiobook-oriented for a non-audiobook request.');
+  }
+  if (lookup.topResults[0]?.likelyAudiobook && effectiveFormat !== 'audiobook') {
+    recommendations.push('Top lookup result appears audiobook-oriented; consider adding searchTermOverride with ebook hints.');
+  }
+  if (!routeSummary.capabilities.hasBookAdd) {
+    recommendations.push('Route list does not clearly expose /api/v1/book add endpoint.');
+  }
+
+  return res.json({
+    success: true,
+    generatedAt: new Date().toISOString(),
+    readarr: {
+      url: process.env.READARR_URL,
+      systemStatus: {
+        ok: statusInfo.ok,
+        statusCode: statusInfo.statusCode,
+        statusText: statusInfo.statusText,
+        version: statusInfo.data?.version || null,
+        branch: statusInfo.data?.branch || null,
+        osName: statusInfo.data?.osName || null
+      },
+      routes: {
+        ok: routesInfo.ok,
+        statusCode: routesInfo.statusCode,
+        statusText: routesInfo.statusText,
+        summary: routeSummary
+      }
+    },
+    requestContext: {
+      sourceRequest: sourceRequest ? {
+        id: sourceRequest.id,
+        status: sourceRequest.status,
+        format: sourceRequest.format,
+        title: sourceRequest.book_title,
+        author: sourceRequest.author
+      } : null,
+      effectiveInput: {
+        title: effectiveTitle,
+        author: effectiveAuthor,
+        isbn: effectiveIsbn,
+        format: effectiveFormat,
+        includeLookup: shouldIncludeLookup
+      }
+    },
+    profiles: {
+      qualityProfiles: {
+        count: qualityProfiles.length,
+        items: qualityProfiles.map(profile => ({ id: profile.id, name: profile.name }))
+      },
+      metadataProfiles: {
+        count: metadataProfiles.length,
+        items: metadataProfiles.map(profile => ({ id: profile.id, name: profile.name }))
+      },
+      rootFolders: {
+        count: rootFolders.length,
+        items: rootFolders.map(folder => ({ path: folder.path, freeSpace: folder.freeSpace || null }))
+      },
+      selected: {
+        qualityProfileId,
+        qualityProfileName: selectedQuality?.name || null,
+        metadataProfileId,
+        metadataProfileName: selectedMetadata?.name || null,
+        rootFolderPath
+      }
+    },
+    envMapping: {
+      quality: {
+        default: parsePositiveInt(process.env.READARR_QUALITY_PROFILE_ID),
+        epub: parsePositiveInt(process.env.READARR_QUALITY_PROFILE_ID_EPUB),
+        pdf: parsePositiveInt(process.env.READARR_QUALITY_PROFILE_ID_PDF),
+        mobi: parsePositiveInt(process.env.READARR_QUALITY_PROFILE_ID_MOBI),
+        audiobook: parsePositiveInt(process.env.READARR_QUALITY_PROFILE_ID_AUDIOBOOK)
+      },
+      metadata: {
+        default: parsePositiveInt(process.env.READARR_METADATA_PROFILE_ID),
+        epub: parsePositiveInt(process.env.READARR_METADATA_PROFILE_ID_EPUB),
+        pdf: parsePositiveInt(process.env.READARR_METADATA_PROFILE_ID_PDF),
+        mobi: parsePositiveInt(process.env.READARR_METADATA_PROFILE_ID_MOBI),
+        audiobook: parsePositiveInt(process.env.READARR_METADATA_PROFILE_ID_AUDIOBOOK)
+      },
+      rootFolder: {
+        default: process.env.READARR_ROOT_FOLDER || null,
+        epub: process.env.READARR_ROOT_FOLDER_EPUB || null,
+        pdf: process.env.READARR_ROOT_FOLDER_PDF || null,
+        mobi: process.env.READARR_ROOT_FOLDER_MOBI || null,
+        audiobook: process.env.READARR_ROOT_FOLDER_AUDIOBOOK || null
+      }
+    },
+    lookup,
+    recommendations
+  });
 });
 
 // Test Readarr integration - search without adding (returns all results with scores)
