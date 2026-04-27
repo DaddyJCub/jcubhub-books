@@ -1099,14 +1099,45 @@ function selectQualityProfileId(format, profiles) {
   return profiles[0].id;
 }
 
-function selectMetadataProfileId(profiles) {
-  const requestedId = parsePositiveInt(process.env.READARR_METADATA_PROFILE_ID);
-  if (requestedId && profiles.some(p => p.id === requestedId)) {
-    return requestedId;
-  }
+function selectMetadataProfileId(format, profiles) {
+  const requestedFormat = String(format || 'any').toLowerCase();
+  const formatEnvMap = {
+    epub: process.env.READARR_METADATA_PROFILE_ID_EPUB,
+    pdf: process.env.READARR_METADATA_PROFILE_ID_PDF,
+    mobi: process.env.READARR_METADATA_PROFILE_ID_MOBI,
+    audiobook: process.env.READARR_METADATA_PROFILE_ID_AUDIOBOOK,
+    any: process.env.READARR_METADATA_PROFILE_ID
+  };
+
+  const requestedId = parsePositiveInt(formatEnvMap[requestedFormat]) || parsePositiveInt(process.env.READARR_METADATA_PROFILE_ID);
+  const looksAudiobook = profile => /\baudiobook\b|\baudio\b/i.test(String(profile?.name || ''));
 
   if (requestedId) {
-    logger.warn('Configured metadata profile not found, using first profile', { requestedId });
+    const requestedProfile = profiles.find(p => p.id === requestedId);
+    if (requestedProfile) {
+      if (requestedFormat !== 'audiobook' && looksAudiobook(requestedProfile)) {
+        logger.warn('Configured metadata profile looks audiobook for non-audiobook request, auto-selecting safer profile', {
+          requestedId,
+          requestedFormat,
+          profileName: requestedProfile.name
+        });
+      } else {
+        return requestedId;
+      }
+    } else {
+      logger.warn('Configured metadata profile not found, using automatic selection', { requestedId, requestedFormat });
+    }
+  }
+
+  if (requestedFormat === 'audiobook') {
+    const audiobookProfile = profiles.find(looksAudiobook);
+    if (audiobookProfile) return audiobookProfile.id;
+  } else {
+    const nonAudioProfiles = profiles.filter(p => !looksAudiobook(p));
+    if (nonAudioProfiles.length > 0) {
+      const namedPreferred = nonAudioProfiles.find(p => /\b(ebook|e-book|standard|default|none|text)\b/i.test(String(p.name || '')));
+      return (namedPreferred || nonAudioProfiles[0]).id;
+    }
   }
 
   return profiles[0].id;
@@ -1137,7 +1168,7 @@ function selectRootFolderPath(format, rootFolders) {
 function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, options = {}) {
   const { qualityProfiles, metadataProfiles, rootFolders } = readarrConfig;
   const qualityProfileId = selectQualityProfileId(effectiveFormat, qualityProfiles);
-  const metadataProfileId = selectMetadataProfileId(metadataProfiles);
+  const metadataProfileId = selectMetadataProfileId(effectiveFormat, metadataProfiles);
   const rootFolderPath = selectRootFolderPath(effectiveFormat, rootFolders);
   const shouldStripAudiobookHints = effectiveFormat !== 'audiobook' || !!options.stripAudiobookMetadata;
   const payloadMediaType = effectiveFormat === 'audiobook' ? 'audiobook' : 'ebook';
@@ -2602,7 +2633,7 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
     const readarrConfig = await getReadarrConfig(forceRefreshConfig === true);
 
     const qualityProfileId = selectQualityProfileId(effectiveFormat, readarrConfig.qualityProfiles);
-    const metadataProfileId = selectMetadataProfileId(readarrConfig.metadataProfiles);
+    const metadataProfileId = selectMetadataProfileId(effectiveFormat, readarrConfig.metadataProfiles);
     const rootFolderPath = selectRootFolderPath(effectiveFormat, readarrConfig.rootFolders);
 
     const rawQuery = effectiveIsbn ? effectiveIsbn : `${effectiveAuthor} ${effectiveTitle}`;

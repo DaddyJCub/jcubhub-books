@@ -1072,10 +1072,12 @@
           if (copied) {
             showToast('Results copied to clipboard!', 'success');
           } else {
-            showToast('Copy failed. Use browser console output as backup.', 'error');
+            window.prompt('Copy JSON (Ctrl+C, Enter):', jsonText);
+            showToast('Clipboard blocked. Manual copy prompt opened.', '');
           }
         } catch {
-          showToast('Copy failed. Use browser console output as backup.', 'error');
+          window.prompt('Copy JSON (Ctrl+C, Enter):', jsonText);
+          showToast('Clipboard blocked. Manual copy prompt opened.', '');
         }
       };
 
