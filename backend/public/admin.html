@@ -1048,10 +1048,43 @@
     }
     
     function copyReadarrResults() {
-      if (window.lastReadarrTestResult) {
-        navigator.clipboard.writeText(JSON.stringify(window.lastReadarrTestResult, null, 2))
+      if (!window.lastReadarrTestResult) {
+        showToast('No results to copy', 'error');
+        return;
+      }
+
+      const jsonText = JSON.stringify(window.lastReadarrTestResult, null, 2);
+
+      const fallbackCopy = () => {
+        try {
+          const textarea = document.createElement('textarea');
+          textarea.value = jsonText;
+          textarea.setAttribute('readonly', '');
+          textarea.style.position = 'fixed';
+          textarea.style.top = '-1000px';
+          textarea.style.left = '-1000px';
+          document.body.appendChild(textarea);
+          textarea.focus();
+          textarea.select();
+          const copied = document.execCommand('copy');
+          document.body.removeChild(textarea);
+
+          if (copied) {
+            showToast('Results copied to clipboard!', 'success');
+          } else {
+            showToast('Copy failed. Use browser console output as backup.', 'error');
+          }
+        } catch {
+          showToast('Copy failed. Use browser console output as backup.', 'error');
+        }
+      };
+
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(jsonText)
           .then(() => showToast('Results copied to clipboard!', 'success'))
-          .catch(() => showToast('Failed to copy', 'error'));
+          .catch(() => fallbackCopy());
+      } else {
+        fallbackCopy();
       }
     }
 

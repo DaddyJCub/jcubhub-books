@@ -1140,6 +1140,9 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
   const metadataProfileId = selectMetadataProfileId(metadataProfiles);
   const rootFolderPath = selectRootFolderPath(effectiveFormat, rootFolders);
   const shouldStripAudiobookHints = effectiveFormat !== 'audiobook' || !!options.stripAudiobookMetadata;
+  const payloadMediaType = effectiveFormat === 'audiobook' ? 'audiobook' : 'ebook';
+  const audiobookSelected = payloadMediaType === 'audiobook';
+  const ebookSelected = !audiobookSelected;
 
   const sanitizedSearchResult = { ...searchResult };
   if (shouldStripAudiobookHints) {
@@ -1179,6 +1182,16 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
     qualityProfileId,
     metadataProfileId,
     rootFolderPath,
+    ebookQualityProfileId: qualityProfileId,
+    ebookMetadataProfileId: metadataProfileId,
+    ebookRootFolderPath: rootFolderPath,
+    audiobookMonitored: audiobookSelected,
+    ebookMonitored: ebookSelected,
+    audiobookMonitorExisting: audiobookSelected ? 2 : 0,
+    audiobookMonitorFuture: audiobookSelected,
+    ebookMonitorExisting: ebookSelected ? 2 : 0,
+    ebookMonitorFuture: ebookSelected,
+    lastSelectedMediaType: payloadMediaType,
     path: `${rootFolderPath}/${safeAuthorFolder}`,
     monitored: true
   } : null;
@@ -1189,12 +1202,20 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
     qualityProfileId,
     metadataProfileId,
     rootFolderPath,
+    ebookQualityProfileId: qualityProfileId,
+    ebookMetadataProfileId: metadataProfileId,
+    ebookRootFolderPath: rootFolderPath,
     author: authorForBook,
     authorId: authorId || 0,
+    mediaType: payloadMediaType,
     monitored: true,
+    audiobookMonitored: audiobookSelected,
+    ebookMonitored: ebookSelected,
+    anyEditionOk: true,
     addOptions: {
-      monitor: 'all',
+      addType: 'manual',
       searchForNewBook: true,
+      monitor: 'all',
       addNewAuthor: true
     }
   };
@@ -1205,6 +1226,7 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
     metadataProfileId,
     rootFolderPath,
     authorId,
+    payloadMediaType,
     shouldStripAudiobookHints
   };
 }
@@ -1291,9 +1313,14 @@ async function addBookToReadarr(bookData) {
       authorName: bookToAdd.author?.authorName,
       authorForeignId: bookToAdd.author?.foreignAuthorId,
       authorQualityProfile: bookToAdd.author?.qualityProfileId,
+      authorEbookQualityProfile: bookToAdd.author?.ebookQualityProfileId,
+      authorEbookMetadataProfile: bookToAdd.author?.ebookMetadataProfileId,
       qualityProfileId: bookToAdd.qualityProfileId,
       metadataProfileId: bookToAdd.metadataProfileId,
       rootFolderPath: bookToAdd.rootFolderPath,
+      mediaType: bookToAdd.mediaType,
+      audiobookMonitored: bookToAdd.audiobookMonitored,
+      ebookMonitored: bookToAdd.ebookMonitored,
       authorPath: bookToAdd.author?.path,
       monitored: bookToAdd.monitored,
       addOptions: bookToAdd.addOptions
@@ -2666,8 +2693,15 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
         authorName: payload.bookToAdd.author?.authorName || payload.bookToAdd.authorName || null,
         qualityProfileId: payload.bookToAdd.qualityProfileId,
         metadataProfileId: payload.bookToAdd.metadataProfileId,
+        ebookQualityProfileId: payload.bookToAdd.ebookQualityProfileId || null,
+        ebookMetadataProfileId: payload.bookToAdd.ebookMetadataProfileId || null,
         rootFolderPath: payload.bookToAdd.rootFolderPath,
+        ebookRootFolderPath: payload.bookToAdd.ebookRootFolderPath || null,
+        mediaType: payload.bookToAdd.mediaType || null,
         monitored: payload.bookToAdd.monitored,
+        audiobookMonitored: payload.bookToAdd.audiobookMonitored,
+        ebookMonitored: payload.bookToAdd.ebookMonitored,
+        addType: payload.bookToAdd.addOptions?.addType || null,
         addOptions: payload.bookToAdd.addOptions,
         strippedAudiobookHints: payload.shouldStripAudiobookHints,
         likelyAudiobook: isLikelyAudiobookResult(scoredEntries[0].book)
