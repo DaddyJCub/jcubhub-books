@@ -568,11 +568,15 @@
   <div class="modal" id="readarrTestModal">
     <div class="modal-content" style="max-width: 800px;">
       <div class="modal-header">
-        <h3 class="modal-title">🧪 Readarr Search Test</h3>
+        <h3 class="modal-title">🧪 Readarr Diagnostics</h3>
         <button class="modal-close" id="readarrTestCloseBtn">&times;</button>
       </div>
       <div id="readarrTestBody">
         <div style="display: grid; gap: 15px; margin-bottom: 20px;">
+          <div>
+            <label style="display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 5px;">Request ID (optional)</label>
+            <input type="text" id="testRequestId" placeholder="e.g., BR-1776215148515-c2glmafd7" style="width: 100%; padding: 12px; background: var(--bg-input); border: 1px solid var(--border-medium); border-radius: var(--radius-md); color: var(--text-primary);">
+          </div>
           <div>
             <label style="display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 5px;">Book Title *</label>
             <input type="text" id="testTitle" placeholder="e.g., The Martian" style="width: 100%; padding: 12px; background: var(--bg-input); border: 1px solid var(--border-medium); border-radius: var(--radius-md); color: var(--text-primary);">
@@ -585,7 +589,21 @@
             <label style="display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 5px;">ISBN (optional)</label>
             <input type="text" id="testIsbn" placeholder="e.g., 978-0553418026" style="width: 100%; padding: 12px; background: var(--bg-input); border: 1px solid var(--border-medium); border-radius: var(--radius-md); color: var(--text-primary);">
           </div>
-          <button class="btn btn-primary" id="runReadarrTestBtn">🔍 Search Readarr</button>
+          <div>
+            <label style="display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 5px;">Requested Format</label>
+            <select id="testFormat" style="width: 100%; padding: 12px; background: var(--bg-input); border: 1px solid var(--border-medium); border-radius: var(--radius-md); color: var(--text-primary);">
+              <option value="any">Any</option>
+              <option value="epub">EPUB</option>
+              <option value="pdf">PDF</option>
+              <option value="mobi">MOBI</option>
+              <option value="audiobook">Audiobook</option>
+            </select>
+          </div>
+          <label style="display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-muted);">
+            <input type="checkbox" id="testAttemptAdd" style="width: 16px; height: 16px;">
+            Attempt live add test (posts to Readarr and may add the book)
+          </label>
+          <button class="btn btn-primary" id="runReadarrTestBtn">🧪 Run Diagnostics</button>
         </div>
         <div id="readarrTestResults"></div>
       </div>
@@ -839,16 +857,19 @@
     // Test Readarr - open modal
     function testReadarr() {
       document.getElementById('readarrTestModal').classList.add('active');
+      document.getElementById('testRequestId').value = '';
       document.getElementById('testTitle').value = '';
       document.getElementById('testAuthor').value = '';
       document.getElementById('testIsbn').value = '';
+      document.getElementById('testFormat').value = 'any';
+      document.getElementById('testAttemptAdd').checked = false;
       document.getElementById('readarrTestResults').innerHTML = `
         <div style="text-align: center; padding: 40px; color: var(--text-muted);">
-          <p>Enter book details above and click Search to test Readarr integration.</p>
-          <p style="font-size: 12px; margin-top: 10px;">Results will show all matches with scoring breakdown.</p>
+          <p>Enter a Request ID or book details, then run diagnostics.</p>
+          <p style="font-size: 12px; margin-top: 10px;">The response includes profile selection, match scoring, payload preview, and optional live add output.</p>
         </div>
       `;
-      document.getElementById('testTitle').focus();
+      document.getElementById('testRequestId').focus();
     }
     
     function closeReadarrTestModal() {
@@ -856,12 +877,15 @@
     }
     
     async function runReadarrTest() {
+      const requestId = document.getElementById('testRequestId').value.trim();
       const title = document.getElementById('testTitle').value.trim();
       const author = document.getElementById('testAuthor').value.trim();
       const isbn = document.getElementById('testIsbn').value.trim();
+      const format = document.getElementById('testFormat').value;
+      const attemptAdd = document.getElementById('testAttemptAdd').checked;
       
-      if (!title || !author) {
-        showToast('Title and author are required', 'error');
+      if (!requestId && (!title || !author)) {
+        showToast('Provide Request ID or Title + Author', 'error');
         return;
       }
       
@@ -871,7 +895,7 @@
       try {
         const response = await apiCall('/api/admin/readarr/test', {
           method: 'POST',
-          body: JSON.stringify({ title, author, isbn })
+          body: JSON.stringify({ requestId, title, author, isbn, format, attemptAdd })
         });
         const result = await response.json();
         
@@ -903,12 +927,22 @@
         let html = `
           <div style="background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.3); border-radius: 12px; padding: 15px; margin-bottom: 15px;">
             <div style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
-              <span style="color: #22c55e;">✅ Readarr v${result.readarrVersion} connected</span>
+              <span style="color: #22c55e;">✅ Readarr v${result.readarrVersion}${result.readarrBranch ? ` (${escapeHtml(result.readarrBranch)})` : ''} connected</span>
               <span style="color: var(--text-muted); font-size: 12px;">Query: "${escapeHtml(result.searchQuery)}"</span>
             </div>
             <div style="margin-top: 10px; font-size: 12px; color: var(--text-muted);">
               Total results: ${result.totalResults} | Showing top ${result.results.length}
             </div>
+            <div style="margin-top: 8px; font-size: 12px; color: var(--text-muted);">
+              Format: ${escapeHtml(result.searchTerms?.format || 'any')} |
+              Quality Profile: ${escapeHtml(result.diagnostics?.selectedProfiles?.qualityProfileName || String(result.diagnostics?.selectedProfiles?.qualityProfileId || 'n/a'))} |
+              Metadata Profile: ${escapeHtml(result.diagnostics?.selectedProfiles?.metadataProfileName || String(result.diagnostics?.selectedProfiles?.metadataProfileId || 'n/a'))}
+            </div>
+            ${result.diagnostics?.requestSource ? `
+              <div style="margin-top: 8px; font-size: 12px; color: var(--text-muted);">
+                Source Request: ${escapeHtml(result.diagnostics.requestSource.id)} (${escapeHtml(result.diagnostics.requestSource.status || 'unknown')})
+              </div>
+            ` : ''}
           </div>
         `;
         
@@ -933,12 +967,19 @@
                   <div style="flex: 1;">
                     <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 5px;">
                       ${isSelected ? '<span style="background: var(--primary); color: white; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 600;">SELECTED</span>' : ''}
+                      ${book.likelyAudiobook ? '<span style="background: rgba(239, 68, 68, 0.2); color: #f87171; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 600;">LIKELY AUDIOBOOK</span>' : '<span style="background: rgba(34, 197, 94, 0.15); color: #4ade80; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 600;">TEXT-FRIENDLY</span>'}
                       <span style="font-weight: 600; color: var(--text-primary);">${escapeHtml(book.title)}</span>
                     </div>
                     <div style="font-size: 13px; color: var(--text-muted);">by ${escapeHtml(book.author || 'Unknown')}</div>
                     ${book.releaseDate ? `<div style="font-size: 12px; color: var(--text-muted);">Released: ${book.releaseDate.split('T')[0]}</div>` : ''}
                     ${book.overview ? `<div style="font-size: 12px; color: var(--text-muted); margin-top: 8px; line-height: 1.4;">${escapeHtml(book.overview)}</div>` : ''}
                     <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">GoodReads ID: ${book.foreignBookId}</div>
+                    ${book.formatHints ? `
+                      <div style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">
+                        Type: ${escapeHtml(book.formatHints.bookType || book.formatHints.mediaType || book.formatHints.bookFormat || 'unknown')}
+                        ${Array.isArray(book.formatHints.editionFormats) && book.formatHints.editionFormats.length > 0 ? `| Editions: ${escapeHtml(book.formatHints.editionFormats.join(', '))}` : ''}
+                      </div>
+                    ` : ''}
                   </div>
                   <div style="text-align: right; min-width: 100px;">
                     <div style="font-size: 24px; font-weight: 700; color: ${book.score >= 50 ? '#22c55e' : book.score > 0 ? '#f59e0b' : '#ef4444'};">${book.score}</div>
@@ -953,6 +994,34 @@
           });
           
           html += `</div>`;
+        }
+
+        if (result.payloadPreview) {
+          html += `
+            <div style="margin-top: 15px; background: var(--bg-card); border: 1px solid var(--border-light); border-radius: 12px; padding: 15px;">
+              <div style="font-weight: 600; margin-bottom: 10px;">Payload Preview</div>
+              <div style="font-size: 12px; color: var(--text-muted); display: grid; gap: 6px;">
+                <div>Title: ${escapeHtml(result.payloadPreview.title || 'n/a')}</div>
+                <div>Author: ${escapeHtml(result.payloadPreview.authorName || 'n/a')}</div>
+                <div>Quality Profile: ${escapeHtml(String(result.payloadPreview.qualityProfileId || 'n/a'))}</div>
+                <div>Metadata Profile: ${escapeHtml(String(result.payloadPreview.metadataProfileId || 'n/a'))}</div>
+                <div>Root Folder: ${escapeHtml(result.payloadPreview.rootFolderPath || 'n/a')}</div>
+                <div>Likely Audiobook: ${result.payloadPreview.likelyAudiobook ? 'yes' : 'no'} | Stripped Audio Hints: ${result.payloadPreview.strippedAudiobookHints ? 'yes' : 'no'}</div>
+              </div>
+            </div>
+          `;
+        }
+
+        if (result.addAttempt?.attempted) {
+          const addOk = result.addAttempt.ok;
+          html += `
+            <div style="margin-top: 15px; background: ${addOk ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.15)'}; border: 1px solid ${addOk ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)'}; border-radius: 12px; padding: 15px;">
+              <div style="font-weight: 600; margin-bottom: 8px; color: ${addOk ? '#22c55e' : '#fca5a5'};">
+                ${addOk ? 'Live Add Succeeded' : 'Live Add Failed'} (${result.addAttempt.statusCode || 'n/a'})
+              </div>
+              <pre style="white-space: pre-wrap; font-size: 11px; max-height: 240px; overflow: auto; background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;">${escapeHtml(JSON.stringify(result.addAttempt.body ?? result.addAttempt.bodyPreview ?? {}, null, 2))}</pre>
+            </div>
+          `;
         }
         
         // Add copy button

@@ -653,6 +653,92 @@ async function checkCwaAvailability(bookTitle, author) {
   }
 }
 
+function isAudioTaggedValue(value) {
+  return /\b(audiobook|audio\s*book|audio)\b/i.test(String(value || ''));
+}
+
+function isLikelyAudiobookResult(book) {
+  const textRegex = /\b(ebook|e-book|epub|mobi|pdf|hardcover|paperback|print|book)\b/i;
+
+  const primaryFields = [
+    book?.bookType,
+    book?.type,
+    book?.mediaType,
+    book?.bookFormat,
+    book?.releaseType
+  ].filter(Boolean).map(v => String(v));
+
+  const editionFields = Array.isArray(book?.editions)
+    ? book.editions.flatMap(edition => [
+        edition?.format,
+        edition?.bookFormat,
+        edition?.mediaType,
+        edition?.releaseType,
+        edition?.title,
+        edition?.moniker
+      ]).filter(Boolean).map(v => String(v))
+    : [];
+
+  const candidates = primaryFields.concat(editionFields);
+  const hasAudio = candidates.some(isAudioTaggedValue);
+  const hasText = candidates.some(value => textRegex.test(value));
+
+  if (hasAudio && !hasText) return true;
+  if (!hasAudio && !hasText) return isAudioTaggedValue(String(book?.title || ''));
+  return false;
+}
+
+function scoreReadarrLookupResult(book, normalizedSearchTitle, normalizedSearchAuthor, preferredFormat = 'any') {
+  const bookTitleLower = (book.title || '').toLowerCase();
+  const bookAuthorLower = (book.authorName || '').toLowerCase();
+  const likelyAudiobook = isLikelyAudiobookResult(book);
+  let score = 0;
+  const scoreBreakdown = [];
+
+  if (bookTitleLower === normalizedSearchTitle) {
+    score += 100;
+    scoreBreakdown.push('+100 exact title');
+  } else if (bookTitleLower.startsWith(normalizedSearchTitle)) {
+    score += 50;
+    scoreBreakdown.push('+50 title starts with');
+  } else if (bookTitleLower.includes(normalizedSearchTitle)) {
+    score += 25;
+    scoreBreakdown.push('+25 title contains');
+  }
+
+  if (bookTitleLower.includes('trivia') ||
+      bookTitleLower.includes('reading list') ||
+      bookTitleLower.includes('study guide') ||
+      bookTitleLower.includes('for fans') ||
+      bookTitleLower.includes('summary') ||
+      bookTitleLower.includes('analysis')) {
+    score -= 50;
+    scoreBreakdown.push('-50 companion book');
+  }
+
+  if (normalizedSearchAuthor &&
+      (bookAuthorLower.includes(normalizedSearchAuthor) ||
+      normalizedSearchAuthor.includes(bookAuthorLower))) {
+    score += 20;
+    scoreBreakdown.push('+20 author match');
+  }
+
+  if (preferredFormat === 'audiobook') {
+    if (likelyAudiobook) {
+      score += 35;
+      scoreBreakdown.push('+35 audiobook preferred');
+    } else {
+      score -= 15;
+      scoreBreakdown.push('-15 non-audiobook while audiobook requested');
+    }
+  } else if (likelyAudiobook) {
+    score -= 80;
+    scoreBreakdown.push('-80 audiobook penalty');
+  }
+
+  return { score, likelyAudiobook, scoreBreakdown };
+}
+
 async function searchReadarr(bookTitle, author, isbn, options = {}) {
   if (!process.env.READARR_URL || !process.env.READARR_API_KEY) {
     return null;
@@ -661,42 +747,12 @@ async function searchReadarr(bookTitle, author, isbn, options = {}) {
   const preferredFormat = String(options.preferredFormat || 'any').toLowerCase();
   const excludeAudiobook = options.excludeAudiobook === true;
   const excludeForeignBookId = String(options.excludeForeignBookId || '').trim();
-
-  const isLikelyAudiobookResult = book => {
-    const audioRegex = /\b(audiobook|audio\s*book|audio)\b/i;
-    const textRegex = /\b(ebook|e-book|epub|mobi|pdf|hardcover|paperback|print|book)\b/i;
-
-    const primaryFields = [
-      book?.bookType,
-      book?.type,
-      book?.mediaType,
-      book?.bookFormat,
-      book?.releaseType
-    ].filter(Boolean).map(v => String(v));
-
-    const editionFields = Array.isArray(book?.editions)
-      ? book.editions.flatMap(edition => [
-          edition?.format,
-          edition?.bookFormat,
-          edition?.mediaType,
-          edition?.releaseType,
-          edition?.title,
-          edition?.moniker
-        ]).filter(Boolean).map(v => String(v))
-      : [];
-
-    const candidates = primaryFields.concat(editionFields);
-    const hasAudio = candidates.some(value => audioRegex.test(value));
-    const hasText = candidates.some(value => textRegex.test(value));
-
-    if (hasAudio && !hasText) return true;
-    if (!hasAudio && !hasText) return audioRegex.test(String(book?.title || ''));
-    return false;
-  };
+  const searchTermOverride = String(options.searchTermOverride || '').trim();
+  const ignoreIsbn = options.ignoreIsbn === true;
 
   try {
     // Use ISBN if available for more accurate search
-    const rawQuery = isbn ? isbn : `${author} ${bookTitle}`;
+    const rawQuery = searchTermOverride || (!ignoreIsbn && isbn ? isbn : `${author} ${bookTitle}`);
     const searchQuery = encodeURIComponent(rawQuery);
     
     logger.info('Readarr search', { searchQuery: rawQuery, usingIsbn: !!isbn });
@@ -735,52 +791,12 @@ async function searchReadarr(bookTitle, author, isbn, options = {}) {
     
     // Score each result for relevance
     const scored = books.map(book => {
-      const bookTitleLower = (book.title || '').toLowerCase();
-      const bookAuthorLower = (book.authorName || '').toLowerCase();
-      const likelyAudiobook = isLikelyAudiobookResult(book);
-      let score = 0;
-      
-      // Exact title match (highest priority)
-      if (bookTitleLower === normalizedSearchTitle) {
-        score += 100;
-      }
-      // Title starts with search title
-      else if (bookTitleLower.startsWith(normalizedSearchTitle)) {
-        score += 50;
-      }
-      // Search title is contained in book title
-      else if (bookTitleLower.includes(normalizedSearchTitle)) {
-        score += 25;
-      }
-      
-      // Penalize titles that look like companion books/guides
-      if (bookTitleLower.includes('trivia') || 
-          bookTitleLower.includes('reading list') || 
-          bookTitleLower.includes('study guide') ||
-          bookTitleLower.includes('for fans') ||
-          bookTitleLower.includes('summary') ||
-          bookTitleLower.includes('analysis')) {
-        score -= 50;
-      }
-      
-      // Author match
-      if (normalizedSearchAuthor &&
-          (bookAuthorLower.includes(normalizedSearchAuthor) ||
-          normalizedSearchAuthor.includes(bookAuthorLower))) {
-        score += 20;
-      }
-
-      if (preferredFormat === 'audiobook') {
-        if (likelyAudiobook) {
-          score += 35;
-        } else {
-          score -= 15;
-        }
-      } else if (likelyAudiobook) {
-        score -= 80;
-      }
-      
-      return { book, score, likelyAudiobook };
+      const details = scoreReadarrLookupResult(book, normalizedSearchTitle, normalizedSearchAuthor, preferredFormat);
+      return {
+        book,
+        score: details.score,
+        likelyAudiobook: details.likelyAudiobook
+      };
     });
     
     // Sort by score descending and return best match
@@ -1118,6 +1134,81 @@ function selectRootFolderPath(format, rootFolders) {
   return rootFolders[0].path;
 }
 
+function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, options = {}) {
+  const { qualityProfiles, metadataProfiles, rootFolders } = readarrConfig;
+  const qualityProfileId = selectQualityProfileId(effectiveFormat, qualityProfiles);
+  const metadataProfileId = selectMetadataProfileId(metadataProfiles);
+  const rootFolderPath = selectRootFolderPath(effectiveFormat, rootFolders);
+  const shouldStripAudiobookHints = effectiveFormat !== 'audiobook' || !!options.stripAudiobookMetadata;
+
+  const sanitizedSearchResult = { ...searchResult };
+  if (shouldStripAudiobookHints) {
+    if (isAudioTaggedValue(sanitizedSearchResult.bookType)) delete sanitizedSearchResult.bookType;
+    if (isAudioTaggedValue(sanitizedSearchResult.mediaType)) delete sanitizedSearchResult.mediaType;
+    if (isAudioTaggedValue(sanitizedSearchResult.bookFormat)) delete sanitizedSearchResult.bookFormat;
+    if (isAudioTaggedValue(sanitizedSearchResult.releaseType)) delete sanitizedSearchResult.releaseType;
+
+    if (Array.isArray(sanitizedSearchResult.editions)) {
+      const nonAudioEditions = sanitizedSearchResult.editions.filter(edition => {
+        const tags = [
+          edition?.format,
+          edition?.bookFormat,
+          edition?.mediaType,
+          edition?.releaseType,
+          edition?.title,
+          edition?.moniker
+        ];
+        return !tags.some(isAudioTaggedValue);
+      });
+
+      if (nonAudioEditions.length > 0) {
+        sanitizedSearchResult.editions = nonAudioEditions;
+      } else {
+        delete sanitizedSearchResult.editions;
+      }
+    }
+  }
+
+  const safeAuthorFolder = (searchResult.author?.authorName || searchResult.authorName || 'Unknown')
+    .replace(/[\\/:*?"<>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const authorForBook = searchResult.author ? {
+    ...searchResult.author,
+    qualityProfileId,
+    metadataProfileId,
+    rootFolderPath,
+    path: `${rootFolderPath}/${safeAuthorFolder}`,
+    monitored: true
+  } : null;
+
+  const authorId = searchResult.author?.id || 0;
+  const bookToAdd = {
+    ...sanitizedSearchResult,
+    qualityProfileId,
+    metadataProfileId,
+    rootFolderPath,
+    author: authorForBook,
+    authorId: authorId || 0,
+    monitored: true,
+    addOptions: {
+      monitor: 'all',
+      searchForNewBook: true,
+      addNewAuthor: true
+    }
+  };
+
+  return {
+    bookToAdd,
+    qualityProfileId,
+    metadataProfileId,
+    rootFolderPath,
+    authorId,
+    shouldStripAudiobookHints
+  };
+}
+
 async function addBookToReadarr(bookData) {
   if (!process.env.READARR_URL || !process.env.READARR_API_KEY) {
     return { success: false, error: 'Readarr not configured' };
@@ -1125,13 +1216,14 @@ async function addBookToReadarr(bookData) {
 
   try {
     const requestedFormat = String(bookData.format || 'any').toLowerCase();
+    const effectiveFormat = String(bookData._formatOverrideForRetry || requestedFormat || 'any').toLowerCase();
 
     // First search for the book (use ISBN if available for accuracy)
     const searchResult = bookData._forcedSearchResult || await searchReadarr(
       bookData.bookTitle,
       bookData.author,
       bookData.isbn,
-      { preferredFormat: requestedFormat }
+      { preferredFormat: effectiveFormat }
     );
     if (!searchResult) {
       return { success: false, error: 'Book not found in Readarr' };
@@ -1166,14 +1258,19 @@ async function addBookToReadarr(bookData) {
       foreignBookId: searchResult.foreignBookId,
       bookTitle: searchResult.title,
       requestedFormat,
+      effectiveFormat,
       editions: searchResult.editions?.length || 0
     });
 
-    const { qualityProfiles, metadataProfiles, rootFolders } = await getReadarrConfig();
-
-    const qualityProfileId = selectQualityProfileId(bookData.format, qualityProfiles);
-    const metadataProfileId = selectMetadataProfileId(metadataProfiles);
-    const rootFolderPath = selectRootFolderPath(bookData.format, rootFolders);
+    const readarrConfig = await getReadarrConfig();
+    const {
+      bookToAdd,
+      qualityProfileId,
+      metadataProfileId,
+      rootFolderPath
+    } = buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, {
+      stripAudiobookMetadata: !!bookData._stripAudiobookMetadata
+    });
     
     logger.info('Using Readarr settings', { qualityProfileId, metadataProfileId, rootFolderPath });
 
@@ -1185,38 +1282,6 @@ async function addBookToReadarr(bookData) {
       foreignBookId: searchResult.foreignBookId,
       authorName: searchResult.author?.authorName || searchResult.authorName
     });
-
-    const authorId = searchResult.author?.id || 0;
-
-    // Build the book object - include full author object so Readarr can create it
-    const safeAuthorFolder = (searchResult.author?.authorName || searchResult.authorName || 'Unknown')
-      .replace(/[\\/:*?"<>|]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    const authorForBook = searchResult.author ? {
-      ...searchResult.author,
-      qualityProfileId: qualityProfileId,
-      metadataProfileId: metadataProfileId,
-      rootFolderPath: rootFolderPath,
-      path: `${rootFolderPath}/${safeAuthorFolder}`,
-      monitored: true
-    } : null;
-
-    const bookToAdd = {
-      ...searchResult,
-      qualityProfileId: qualityProfileId,
-      metadataProfileId: metadataProfileId,
-      rootFolderPath: rootFolderPath,
-      author: authorForBook,
-      authorId: authorId || 0,
-      monitored: true,
-      addOptions: {
-        monitor: 'all',
-        searchForNewBook: true,
-        addNewAuthor: true  // Tell Readarr to add the author if needed
-      }
-    };
 
     // Debug: Log key fields of bookToAdd
     logger.info('Readarr book payload', {
@@ -1306,21 +1371,24 @@ async function addBookToReadarr(bookData) {
       });
 
       const audiobookProfileError = /audiobook metadata profile is not set/i.test(errorMessage || '');
-      const canRetryNonAudiobook = audiobookProfileError && requestedFormat !== 'audiobook' && !bookData._audioRetryAttempted;
+      const canRetryNonAudiobook = audiobookProfileError && !bookData._audioRetryAttempted;
 
       if (canRetryNonAudiobook) {
         logger.warn('Retrying Readarr add with non-audiobook candidate', {
           bookTitle: bookData.bookTitle,
           requestedFormat,
+          effectiveFormat,
           previousForeignBookId: searchResult.foreignBookId || null
         });
+
+        const retryFormat = effectiveFormat === 'audiobook' ? 'any' : effectiveFormat;
 
         const alternateSearchResult = await searchReadarr(
           bookData.bookTitle,
           bookData.author,
           bookData.isbn,
           {
-            preferredFormat: requestedFormat,
+            preferredFormat: retryFormat,
             excludeAudiobook: true,
             excludeForeignBookId: searchResult.foreignBookId || ''
           }
@@ -1335,9 +1403,41 @@ async function addBookToReadarr(bookData) {
           return addBookToReadarr({
             ...bookData,
             _forcedSearchResult: alternateSearchResult,
+            _formatOverrideForRetry: retryFormat,
+            _stripAudiobookMetadata: true,
             _audioRetryAttempted: true
           });
         }
+
+        const ebookBiasedSearch = await searchReadarr(
+          bookData.bookTitle,
+          bookData.author,
+          bookData.isbn,
+          {
+            preferredFormat: retryFormat,
+            excludeAudiobook: true,
+            ignoreIsbn: true,
+            searchTermOverride: `${bookData.author} ${bookData.bookTitle} ebook`
+          }
+        );
+
+        if (ebookBiasedSearch) {
+          return addBookToReadarr({
+            ...bookData,
+            _forcedSearchResult: ebookBiasedSearch,
+            _formatOverrideForRetry: retryFormat,
+            _stripAudiobookMetadata: true,
+            _audioRetryAttempted: true
+          });
+        }
+
+        return addBookToReadarr({
+          ...bookData,
+          _forcedSearchResult: searchResult,
+          _formatOverrideForRetry: retryFormat,
+          _stripAudiobookMetadata: true,
+          _audioRetryAttempted: true
+        });
       }
 
       return { success: false, error: errorMessage, statusCode: response.status };
@@ -2419,137 +2519,245 @@ app.get('/api/admin/readarr/search', authenticateToken, async (req, res) => {
 
 // Test Readarr integration - search without adding (returns all results with scores)
 app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
-  const { title, author, isbn } = req.body;
-  
-  if (!title || !author) {
-    return res.status(400).json({ error: 'Title and author are required' });
-  }
+  const {
+    title,
+    author,
+    isbn,
+    format,
+    requestId,
+    attemptAdd,
+    forceRefreshConfig,
+    includeRawResults
+  } = req.body || {};
+
+  const requestedFormat = String(format || 'any').toLowerCase();
+  const shouldAttemptAdd = attemptAdd === true;
 
   try {
-    // Check if Readarr is configured
     if (!process.env.READARR_URL || !process.env.READARR_API_KEY) {
-      return res.json({ 
-        success: false, 
+      return res.json({
+        success: false,
         message: 'Readarr is not configured (READARR_URL and READARR_API_KEY required)',
         configured: false
       });
     }
 
-    // Test connection to Readarr
-    const testResponse = await fetchWithTimeout(`${process.env.READARR_URL}/api/v1/system/status`, {
+    let sourceRequest = null;
+    if (requestId) {
+      sourceRequest = db.prepare('SELECT * FROM requests WHERE id = ?').get(requestId);
+      if (!sourceRequest) {
+        return res.status(404).json({ error: 'Request not found' });
+      }
+    }
+
+    const effectiveTitle = String(sourceRequest?.book_title || title || '').trim();
+    const effectiveAuthor = String(sourceRequest?.author || author || '').trim();
+    const effectiveIsbn = String(sourceRequest?.isbn || isbn || '').trim();
+    const effectiveFormat = String(sourceRequest?.format || requestedFormat || 'any').toLowerCase();
+
+    if (!effectiveTitle || !effectiveAuthor) {
+      return res.status(400).json({ error: 'Title and author are required (or provide requestId)' });
+    }
+
+    const statusResponse = await fetchWithTimeout(`${process.env.READARR_URL}/api/v1/system/status`, {
       headers: { 'X-Api-Key': process.env.READARR_API_KEY }
     }, 'Readarr system status');
-    
-    if (!testResponse.ok) {
-      return res.json({ 
-        success: false, 
-        message: `Readarr connection failed: ${testResponse.status} ${testResponse.statusText}`,
+
+    if (!statusResponse.ok) {
+      return res.json({
+        success: false,
+        message: `Readarr connection failed: ${statusResponse.status} ${statusResponse.statusText}`,
         configured: true
       });
     }
 
-    const readarrStatus = await testResponse.json();
+    const readarrStatus = await statusResponse.json();
+    const readarrConfig = await getReadarrConfig(forceRefreshConfig === true);
 
-    // Search for the book - do raw search to get all results
-    const rawQuery = isbn ? isbn : `${author} ${title}`;
+    const qualityProfileId = selectQualityProfileId(effectiveFormat, readarrConfig.qualityProfiles);
+    const metadataProfileId = selectMetadataProfileId(readarrConfig.metadataProfiles);
+    const rootFolderPath = selectRootFolderPath(effectiveFormat, readarrConfig.rootFolders);
+
+    const rawQuery = effectiveIsbn ? effectiveIsbn : `${effectiveAuthor} ${effectiveTitle}`;
     const searchQuery = encodeURIComponent(rawQuery);
-    
-    logger.info('Test Readarr search', { title, author, isbn: isbn || '(none)', searchQuery: rawQuery });
-    
+
+    logger.info('Test Readarr search', {
+      title: effectiveTitle,
+      author: effectiveAuthor,
+      isbn: effectiveIsbn || '(none)',
+      format: effectiveFormat,
+      searchQuery: rawQuery,
+      attemptAdd: shouldAttemptAdd,
+      requestId: sourceRequest?.id || null
+    });
+
     const searchResponse = await fetchWithTimeout(`${process.env.READARR_URL}/api/v1/book/lookup?term=${searchQuery}`, {
       headers: { 'X-Api-Key': process.env.READARR_API_KEY }
     }, 'Readarr test search');
-    
+
     if (!searchResponse.ok) {
       return res.json({
         success: false,
         message: `Readarr search failed: ${searchResponse.status}`,
         configured: true,
-        readarrVersion: readarrStatus.version
+        readarrVersion: readarrStatus.version,
+        diagnostics: {
+          searchStatusCode: searchResponse.status,
+          searchStatusText: searchResponse.statusText,
+          selectedProfiles: { qualityProfileId, metadataProfileId, rootFolderPath }
+        }
       });
     }
-    
+
     const books = await searchResponse.json();
-    
-    // Score all results
-    const normalizedSearchTitle = title.toLowerCase().trim();
-    const normalizedSearchAuthor = author.toLowerCase().trim();
-    
-    const scoredResults = books.slice(0, 10).map(book => {
-      const bookTitleLower = (book.title || '').toLowerCase();
-      const bookAuthorLower = (book.authorName || '').toLowerCase();
-      let score = 0;
-      const scoreBreakdown = [];
-      
-      // Exact title match
-      if (bookTitleLower === normalizedSearchTitle) {
-        score += 100;
-        scoreBreakdown.push('+100 exact title');
-      } else if (bookTitleLower.startsWith(normalizedSearchTitle)) {
-        score += 50;
-        scoreBreakdown.push('+50 title starts with');
-      } else if (bookTitleLower.includes(normalizedSearchTitle)) {
-        score += 25;
-        scoreBreakdown.push('+25 title contains');
-      }
-      
-      // Penalize companion books
-      if (bookTitleLower.includes('trivia') || 
-          bookTitleLower.includes('reading list') || 
-          bookTitleLower.includes('study guide') ||
-          bookTitleLower.includes('for fans') ||
-          bookTitleLower.includes('summary') ||
-          bookTitleLower.includes('analysis')) {
-        score -= 50;
-        scoreBreakdown.push('-50 companion book');
-      }
-      
-      // Author match
-      if (normalizedSearchAuthor &&
-          (bookAuthorLower.includes(normalizedSearchAuthor) ||
-          normalizedSearchAuthor.includes(bookAuthorLower))) {
-        score += 20;
-        scoreBreakdown.push('+20 author match');
-      }
-      
+    const normalizedSearchTitle = effectiveTitle.toLowerCase().trim();
+    const normalizedSearchAuthor = effectiveAuthor.toLowerCase().trim();
+
+    const scoredEntries = books.map(book => {
+      const details = scoreReadarrLookupResult(book, normalizedSearchTitle, normalizedSearchAuthor, effectiveFormat);
       return {
-        title: book.title,
-        author: book.authorName,
-        foreignBookId: book.foreignBookId,
-        releaseDate: book.releaseDate,
-        overview: book.overview?.substring(0, 150) + (book.overview?.length > 150 ? '...' : ''),
-        score,
-        scoreBreakdown,
-        isSelected: false
+        book,
+        score: details.score,
+        likelyAudiobook: details.likelyAudiobook,
+        scoreBreakdown: details.scoreBreakdown
       };
     });
-    
-    // Sort by score and mark selected
-    scoredResults.sort((a, b) => b.score - a.score);
-    if (scoredResults.length > 0) {
-      scoredResults[0].isSelected = true;
+
+    scoredEntries.sort((a, b) => b.score - a.score);
+
+    const scoredResults = scoredEntries.slice(0, 10).map((entry, idx) => ({
+      title: entry.book.title,
+      author: entry.book.authorName,
+      foreignBookId: entry.book.foreignBookId,
+      releaseDate: entry.book.releaseDate,
+      overview: entry.book.overview?.substring(0, 150) + (entry.book.overview?.length > 150 ? '...' : ''),
+      score: entry.score,
+      scoreBreakdown: entry.scoreBreakdown,
+      likelyAudiobook: entry.likelyAudiobook,
+      formatHints: {
+        bookType: entry.book.bookType || null,
+        mediaType: entry.book.mediaType || null,
+        bookFormat: entry.book.bookFormat || null,
+        editionFormats: Array.isArray(entry.book.editions)
+          ? entry.book.editions
+              .map(e => e?.format || e?.bookFormat || e?.mediaType || e?.releaseType || null)
+              .filter(Boolean)
+              .slice(0, 5)
+          : []
+      },
+      isSelected: idx === 0
+    }));
+
+    let payloadPreview = null;
+    let addAttemptResult = {
+      attempted: false,
+      note: 'Set attemptAdd=true to post this payload directly to Readarr/Chaptarr for live validation.'
+    };
+
+    if (scoredEntries[0]) {
+      const payload = buildReadarrBookPayload(scoredEntries[0].book, effectiveFormat, readarrConfig, {
+        stripAudiobookMetadata: effectiveFormat !== 'audiobook'
+      });
+
+      payloadPreview = {
+        title: payload.bookToAdd.title,
+        foreignBookId: payload.bookToAdd.foreignBookId,
+        authorId: payload.bookToAdd.authorId,
+        authorName: payload.bookToAdd.author?.authorName || payload.bookToAdd.authorName || null,
+        qualityProfileId: payload.bookToAdd.qualityProfileId,
+        metadataProfileId: payload.bookToAdd.metadataProfileId,
+        rootFolderPath: payload.bookToAdd.rootFolderPath,
+        monitored: payload.bookToAdd.monitored,
+        addOptions: payload.bookToAdd.addOptions,
+        strippedAudiobookHints: payload.shouldStripAudiobookHints,
+        likelyAudiobook: isLikelyAudiobookResult(scoredEntries[0].book)
+      };
+
+      if (shouldAttemptAdd) {
+        const addResponse = await fetchWithTimeout(`${process.env.READARR_URL}/api/v1/book`, {
+          method: 'POST',
+          headers: {
+            'X-Api-Key': process.env.READARR_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload.bookToAdd)
+        }, 'Readarr test add');
+
+        const addBodyText = await addResponse.text();
+        let parsedBody = null;
+        try {
+          parsedBody = addBodyText ? JSON.parse(addBodyText) : null;
+        } catch {
+          parsedBody = null;
+        }
+
+        addAttemptResult = {
+          attempted: true,
+          ok: addResponse.ok,
+          statusCode: addResponse.status,
+          statusText: addResponse.statusText,
+          body: parsedBody || addBodyText,
+          bodyPreview: addBodyText?.substring(0, 1000) || ''
+        };
+      }
     }
-    
-    logger.info('Test Readarr results', { 
-      searchQuery: rawQuery, 
+
+    const selectedQuality = readarrConfig.qualityProfiles.find(p => p.id === qualityProfileId);
+    const selectedMetadata = readarrConfig.metadataProfiles.find(p => p.id === metadataProfileId);
+    const selectedRootFolder = readarrConfig.rootFolders.find(r => r.path === rootFolderPath);
+
+    logger.info('Test Readarr results', {
+      searchQuery: rawQuery,
       totalFound: books.length,
-      topScore: scoredResults[0]?.score,
-      selectedTitle: scoredResults[0]?.title
+      topScore: scoredEntries[0]?.score,
+      selectedTitle: scoredEntries[0]?.book?.title,
+      likelyAudiobook: scoredEntries[0]?.likelyAudiobook,
+      attemptAdd: shouldAttemptAdd,
+      addStatus: addAttemptResult.statusCode || null
     });
-    
+
     res.json({
       success: true,
       configured: true,
       readarrVersion: readarrStatus.version,
+      readarrBranch: readarrStatus.branch || null,
       searchQuery: rawQuery,
-      searchTerms: { title, author, isbn: isbn || '' },
+      searchTerms: {
+        title: effectiveTitle,
+        author: effectiveAuthor,
+        isbn: effectiveIsbn,
+        format: effectiveFormat
+      },
       totalResults: books.length,
-      results: scoredResults
+      results: scoredResults,
+      payloadPreview,
+      addAttempt: addAttemptResult,
+      diagnostics: {
+        selectedProfiles: {
+          qualityProfileId,
+          qualityProfileName: selectedQuality?.name || null,
+          metadataProfileId,
+          metadataProfileName: selectedMetadata?.name || null,
+          rootFolderPath,
+          rootFolderFreeSpace: selectedRootFolder?.freeSpace || null
+        },
+        counts: {
+          qualityProfiles: readarrConfig.qualityProfiles.length,
+          metadataProfiles: readarrConfig.metadataProfiles.length,
+          rootFolders: readarrConfig.rootFolders.length
+        },
+        requestSource: sourceRequest ? {
+          id: sourceRequest.id,
+          status: sourceRequest.status,
+          originalFormat: sourceRequest.format
+        } : null
+      },
+      rawResults: includeRawResults === true ? books.slice(0, 3) : undefined
     });
   } catch (error) {
     logger.error('Readarr test error', { error: error.message });
-    res.json({ 
-      success: false, 
+    res.json({
+      success: false,
       message: `Error testing Readarr: ${error.message}`,
       configured: true
     });
