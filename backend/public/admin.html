@@ -1009,6 +1009,7 @@
                 <div>Quality Profile: ${escapeHtml(String(result.payloadPreview.qualityProfileId || 'n/a'))}</div>
                 <div>Metadata Profile: ${escapeHtml(String(result.payloadPreview.metadataProfileId || 'n/a'))}</div>
                 <div>Root Folder: ${escapeHtml(result.payloadPreview.rootFolderPath || 'n/a')}</div>
+                <div>Add New Author: ${result.payloadPreview.addNewAuthor ? 'yes' : 'no'}</div>
                 <div>Likely Audiobook: ${result.payloadPreview.likelyAudiobook ? 'yes' : 'no'} | Stripped Audio Hints: ${result.payloadPreview.strippedAudiobookHints ? 'yes' : 'no'}</div>
               </div>
             </div>

@@ -1174,6 +1174,27 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
   const payloadMediaType = effectiveFormat === 'audiobook' ? 'audiobook' : 'ebook';
   const audiobookSelected = payloadMediaType === 'audiobook';
   const ebookSelected = !audiobookSelected;
+  const stripAudiobookFieldRegex = /^(audiobookrootfolderpath|audiobookqualityprofileid|audiobookmetadataprofileid|narratorprofileid|availablenarrators|narratorentity|narratornames|iswantednarrator)$/i;
+
+  const stripAudiobookOnlyFieldsDeep = value => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      value.forEach(stripAudiobookOnlyFieldsDeep);
+      return;
+    }
+
+    for (const key of Object.keys(value)) {
+      if (stripAudiobookFieldRegex.test(String(key || ''))) {
+        delete value[key];
+        continue;
+      }
+
+      const child = value[key];
+      if (child && typeof child === 'object') {
+        stripAudiobookOnlyFieldsDeep(child);
+      }
+    }
+  };
 
   const sanitizedSearchResult = { ...searchResult };
   if (shouldStripAudiobookHints) {
@@ -1208,20 +1229,21 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
     .replace(/\s+/g, ' ')
     .trim();
 
-  const authorId = parsePositiveInt(searchResult.author?.id) || 0;
+  const authorId =
+    parsePositiveInt(searchResult.authorId) ||
+    parsePositiveInt(searchResult.author?.id) ||
+    parsePositiveInt(searchResult.author?.authorId) ||
+    parsePositiveInt(searchResult.localAuthorId) ||
+    0;
   let authorForBook = null;
 
-  if (searchResult.author) {
-    const baseAuthor = authorId > 0
-      ? {
-          id: authorId,
-          authorName: searchResult.author?.authorName || searchResult.authorName || null,
-          foreignAuthorId: searchResult.author?.foreignAuthorId || null
-        }
-      : {
-          ...searchResult.author,
-          path: `${rootFolderPath}/${safeAuthorFolder}`
-        };
+  // If Readarr/Chaptarr already knows this author, avoid posting full author payload.
+  // That payload can include fork-specific audiobook-only fields and trigger false validation.
+  if (searchResult.author && authorId === 0) {
+    const baseAuthor = {
+      ...searchResult.author,
+      path: `${rootFolderPath}/${safeAuthorFolder}`
+    };
 
     authorForBook = {
       ...baseAuthor,
@@ -1258,7 +1280,6 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
     ebookQualityProfileId: qualityProfileId,
     ebookMetadataProfileId: metadataProfileId,
     ebookRootFolderPath: rootFolderPath,
-    author: authorForBook,
     authorId: authorId || 0,
     mediaType: payloadMediaType,
     monitored: true,
@@ -1269,9 +1290,15 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
       addType: 'manual',
       searchForNewBook: true,
       monitor: 'all',
-      addNewAuthor: authorId === 0
+      addNewAuthor: authorId === 0 && !!authorForBook
     }
   };
+
+  if (authorForBook) {
+    bookToAdd.author = authorForBook;
+  } else {
+    delete bookToAdd.author;
+  }
 
   if (ebookSelected) {
     delete bookToAdd.audiobookRootFolderPath;
@@ -1282,6 +1309,7 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
     delete bookToAdd.narratorEntity;
     delete bookToAdd.narratorNames;
     delete bookToAdd.isWantedNarrator;
+    stripAudiobookOnlyFieldsDeep(bookToAdd);
   }
 
   return {
@@ -2772,6 +2800,7 @@ app.post('/api/admin/readarr/snapshot', authenticateToken, async (req, res) => {
         selectedTitle: payload.bookToAdd.title || null,
         selectedForeignBookId: payload.bookToAdd.foreignBookId || null,
         authorId: payload.bookToAdd.authorId || null,
+        addNewAuthor: payload.bookToAdd.addOptions?.addNewAuthor,
         addOptions: payload.bookToAdd.addOptions || null,
         profileSelection: {
           qualityProfileId: payload.bookToAdd.qualityProfileId || null,
@@ -3060,6 +3089,7 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
         foreignBookId: payload.bookToAdd.foreignBookId,
         authorId: payload.bookToAdd.authorId,
         authorName: payload.bookToAdd.author?.authorName || payload.bookToAdd.authorName || null,
+        addNewAuthor: payload.bookToAdd.addOptions?.addNewAuthor,
         qualityProfileId: payload.bookToAdd.qualityProfileId,
         metadataProfileId: payload.bookToAdd.metadataProfileId,
         ebookQualityProfileId: payload.bookToAdd.ebookQualityProfileId || null,
