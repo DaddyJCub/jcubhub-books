@@ -1351,7 +1351,7 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
 
   // If Readarr/Chaptarr already knows this author, avoid posting full author payload.
   // That payload can include fork-specific audiobook-only fields and trigger false validation.
-  if (searchResult.author && authorId === 0) {
+  if (searchResult.author && (authorId === 0 || options.forceFullAuthorPayload === true)) {
     const baseAuthor = {
       ...searchResult.author,
       path: `${rootFolderPath}/${safeAuthorFolder}`
@@ -1382,6 +1382,28 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
       delete authorForBook.narratorProfileId;
       delete authorForBook.audiobookTags;
     }
+  } else if (authorId > 0) {
+    // Existing local author path: include a minimal author object to avoid fork null-reference issues
+    // without sending audiobook-only profile/root fields.
+    authorForBook = {
+      id: authorId,
+      authorName: searchResult.author?.authorName || searchResult.authorName || null,
+      foreignAuthorId: searchResult.author?.foreignAuthorId || null,
+      monitored: true,
+      qualityProfileId,
+      metadataProfileId,
+      rootFolderPath,
+      ebookQualityProfileId: qualityProfileId,
+      ebookMetadataProfileId: metadataProfileId,
+      ebookRootFolderPath: rootFolderPath,
+      audiobookMonitored: audiobookSelected,
+      ebookMonitored: ebookSelected,
+      audiobookMonitorExisting: audiobookSelected ? 2 : 0,
+      audiobookMonitorFuture: audiobookSelected,
+      ebookMonitorExisting: ebookSelected ? 2 : 0,
+      ebookMonitorFuture: ebookSelected,
+      lastSelectedMediaType: payloadMediaType
+    };
   }
 
   const bookToAdd = {
@@ -1519,7 +1541,8 @@ async function addBookToReadarr(bookData) {
       rootFolderPath
     } = buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, {
       stripAudiobookMetadata: !!bookData._stripAudiobookMetadata,
-      resolvedAuthorId
+      resolvedAuthorId,
+      forceFullAuthorPayload: !!bookData._forceFullAuthorPayload
     });
 
     if (resolvedAuthorId > 0) {
@@ -1631,6 +1654,23 @@ async function addBookToReadarr(bookData) {
         status: response.status,
         error: errorMessage 
       });
+
+      const nullReferenceError = /object reference not set to an instance of an object/i.test(errorMessage || '');
+      if (nullReferenceError && !bookData._nullRefRetryAttempted) {
+        logger.warn('Retrying Readarr add with full author payload after null-reference error', {
+          bookTitle: bookData.bookTitle,
+          foreignBookId: searchResult.foreignBookId || null,
+          resolvedAuthorId
+        });
+
+        return addBookToReadarr({
+          ...bookData,
+          _forcedSearchResult: searchResult,
+          _forceFullAuthorPayload: true,
+          _stripAudiobookMetadata: true,
+          _nullRefRetryAttempted: true
+        });
+      }
 
       const audiobookProfileError = /audiobook metadata profile is not set|audiobookrootfolderpath|selected root folder is not configured for audiobooks|audiobooks are disabled/i.test(errorMessage || '');
       const canRetryNonAudiobook = audiobookProfileError && !bookData._audioRetryAttempted;
@@ -3238,6 +3278,7 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
         authorId: payload.bookToAdd.authorId,
         resolvedAuthorId: payload.authorId || null,
         authorName: payload.bookToAdd.author?.authorName || payload.bookToAdd.authorName || null,
+        forceFullAuthorPayload: false,
         addNewAuthor: payload.bookToAdd.addOptions?.addNewAuthor,
         qualityProfileId: payload.bookToAdd.qualityProfileId,
         metadataProfileId: payload.bookToAdd.metadataProfileId,
