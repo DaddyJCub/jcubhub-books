@@ -534,9 +534,68 @@ function generateReadarrUrl(author, bookTitle, isbn) {
   return `${process.env.READARR_URL}/add/search?term=${searchQuery}`;
 }
 
-function buildCwaSearchLink(bookTitle) {
-  if (!process.env.CWA_URL) return null;
-  return `${process.env.CWA_URL}/search?query=${encodeURIComponent(bookTitle)}`;
+function getCwaBaseUrl() {
+  const raw = String(process.env.CWA_URL || '').trim();
+  if (!raw) return null;
+
+  const trimmed = raw.replace(/\/+$/, '');
+  try {
+    const parsed = new URL(trimmed);
+    parsed.pathname = parsed.pathname.replace(/\/+$/, '').replace(/\/opds$/i, '') || '/';
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return trimmed.replace(/\/opds$/i, '');
+  }
+}
+
+function buildCwaSearchLink(bookTitle, author = '') {
+  const cwaBase = getCwaBaseUrl();
+  if (!cwaBase) return null;
+
+  const queryText = [bookTitle, author].filter(Boolean).join(' ').trim() || String(bookTitle || '').trim();
+  try {
+    const searchUrl = new URL('/search', cwaBase);
+    searchUrl.searchParams.set('query', queryText);
+    return searchUrl.toString();
+  } catch {
+    return `${cwaBase}/search?query=${encodeURIComponent(queryText)}`;
+  }
+}
+
+function normalizeCwaBookLink(rawLink) {
+  if (!rawLink) return null;
+  const cwaBase = getCwaBaseUrl();
+  if (!cwaBase) return null;
+
+  const extractBookPath = pathname => {
+    const directBook = pathname.match(/\/book\/(\d+)\/?$/i)?.[1];
+    if (directBook) return `/book/${directBook}`;
+
+    const opdsBook = pathname.match(/\/opds\/(?:book|books)\/(\d+)\/?$/i)?.[1];
+    if (opdsBook) return `/book/${opdsBook}`;
+
+    const opdsDownload = pathname.match(/\/opds\/download\/(\d+)\//i)?.[1];
+    if (opdsDownload) return `/book/${opdsDownload}`;
+
+    return null;
+  };
+
+  try {
+    const absolute = new URL(rawLink, cwaBase);
+    const mappedBookPath = extractBookPath(absolute.pathname);
+    if (mappedBookPath) {
+      return new URL(mappedBookPath, cwaBase).toString();
+    }
+
+    if (absolute.pathname.startsWith('/opds/')) {
+      return null;
+    }
+
+    return absolute.toString();
+  } catch {
+    if (String(rawLink).startsWith('/')) return `${cwaBase}${rawLink}`;
+    return `${cwaBase}/${rawLink}`;
+  }
 }
 
 function normalizeForMatch(value) {
@@ -560,13 +619,33 @@ function parseCwaOpdsEntries(xml) {
     const author = (block.match(/<author>[\s\S]*?<name[^>]*>([\s\S]*?)<\/name>[\s\S]*?<\/author>/i)?.[1] || '')
       .replace(/<[^>]+>/g, '')
       .trim();
-    const bookHref = block.match(/<link[^>]+href="([^"]*\/book\/\d+[^"]*)"[^>]*>/i)?.[1] || null;
-    const fallbackHref = block.match(/<link[^>]+href="([^"]+)"[^>]*>/i)?.[1] || null;
+    const links = [];
+    const linkRegex = /<link\b([^>]+)>/gi;
+    let linkMatch;
+    while ((linkMatch = linkRegex.exec(block)) !== null) {
+      const attrs = linkMatch[1];
+      const href = attrs.match(/\bhref="([^"]+)"/i)?.[1] || null;
+      const rel = attrs.match(/\brel="([^"]+)"/i)?.[1] || '';
+      const type = attrs.match(/\btype="([^"]+)"/i)?.[1] || '';
+
+      if (href) {
+        links.push({ href, rel: rel.toLowerCase(), type: type.toLowerCase() });
+      }
+    }
+
+    const preferred =
+      links.find(link => /\/book\/\d+/i.test(link.href)) ||
+      links.find(link => /\/opds\/(?:book|books)\/\d+/i.test(link.href)) ||
+      links.find(link => link.rel.includes('alternate') && link.type.includes('html')) ||
+      links.find(link => link.rel.includes('alternate')) ||
+      links.find(link => !link.href.includes('/opds/download/')) ||
+      links[0] ||
+      null;
 
     entries.push({
       title,
       author,
-      bookHref: bookHref || fallbackHref
+      bookHref: preferred?.href || null
     });
   }
 
@@ -603,13 +682,17 @@ function chooseBestCwaEntry(entries, bookTitle, author) {
 }
 
 async function checkCwaAvailability(bookTitle, author) {
-  if (!process.env.CWA_URL || !process.env.CWA_USERNAME || !process.env.CWA_PASSWORD) {
+  const cwaBase = getCwaBaseUrl();
+  if (!cwaBase || !process.env.CWA_USERNAME || !process.env.CWA_PASSWORD) {
     return { available: false };
   }
 
   try {
     const credentials = Buffer.from(`${process.env.CWA_USERNAME}:${process.env.CWA_PASSWORD}`).toString('base64');
-    const response = await fetchWithTimeout(`${process.env.CWA_URL}/opds/search?query=${encodeURIComponent(bookTitle)}`, {
+    const opdsSearchUrl = new URL('/opds/search', cwaBase);
+    opdsSearchUrl.searchParams.set('query', [bookTitle, author].filter(Boolean).join(' ').trim() || bookTitle);
+
+    const response = await fetchWithTimeout(opdsSearchUrl.toString(), {
       headers: {
         'Authorization': `Basic ${credentials}`
       }
@@ -621,14 +704,7 @@ async function checkCwaAvailability(bookTitle, author) {
     const entries = parseCwaOpdsEntries(xml);
     const bestEntry = chooseBestCwaEntry(entries, bookTitle, author);
 
-    const normalizeLink = rawLink => {
-      if (!rawLink) return null;
-      if (rawLink.startsWith('http://') || rawLink.startsWith('https://')) return rawLink;
-      if (rawLink.startsWith('/')) return `${process.env.CWA_URL}${rawLink}`;
-      return `${process.env.CWA_URL}/${rawLink}`;
-    };
-
-    const bookLink = normalizeLink(bestEntry?.bookHref) || buildCwaSearchLink(bookTitle);
+    const bookLink = normalizeCwaBookLink(bestEntry?.bookHref) || buildCwaSearchLink(bookTitle, author);
     const found = !!bestEntry;
 
     logger.debug('CWA availability check', {
@@ -933,10 +1009,14 @@ async function resolveCwaLinkForRequest(request, cwaCheck = null) {
     return cwaCheck.bookLink;
   }
   if (request?.cwa_book_link) {
-    return request.cwa_book_link;
+    const normalizedStoredLink = normalizeCwaBookLink(request.cwa_book_link) || request.cwa_book_link;
+    if (request.id && normalizedStoredLink !== request.cwa_book_link) {
+      updateRequestCwaState(request.id, new Date().toISOString(), true, normalizedStoredLink);
+    }
+    return normalizedStoredLink;
   }
   if (!integrations.cwa) {
-    return buildCwaSearchLink(request?.book_title || '');
+    return buildCwaSearchLink(request?.book_title || '', request?.author || '');
   }
 
   const resolved = await checkCwaAvailability(request.book_title, request.author);
@@ -944,7 +1024,7 @@ async function resolveCwaLinkForRequest(request, cwaCheck = null) {
     return resolved.bookLink;
   }
 
-  return buildCwaSearchLink(request.book_title);
+  return buildCwaSearchLink(request.book_title, request.author);
 }
 
 function findTrackedRequestConflict(currentRequestId, identifiers = {}) {
@@ -982,7 +1062,7 @@ async function notifyAdminLifecycle(eventType, request, details = {}) {
   const safeAuthor = escapeHtml(request.author);
   const safeRequestId = escapeHtml(request.id);
   const safeDetails = escapeHtml(details.message || '');
-  const cwaLink = details.cwaLink || request.cwa_book_link || buildCwaSearchLink(request.book_title) || '';
+  const cwaLink = details.cwaLink || request.cwa_book_link || buildCwaSearchLink(request.book_title, request.author) || '';
 
   let subject = '';
   let title = '';
@@ -1909,7 +1989,7 @@ app.post('/api/book-request',
       return res.status(200).json({ 
         alreadyAvailable: true,
         message: 'Great news! This book is already available in our library.',
-        bookLink: cwaCheck.bookLink || process.env.CWA_URL
+        bookLink: cwaCheck.bookLink || buildCwaSearchLink(bookTitle, author)
       });
     }
 
@@ -2136,7 +2216,13 @@ app.post('/api/request-status',
       return res.status(404).json({ error: 'Request not found' });
     }
 
-    let cwaBookLink = request.cwa_book_link || null;
+    const normalizedStoredLink = request.cwa_book_link
+      ? (normalizeCwaBookLink(request.cwa_book_link) || request.cwa_book_link)
+      : null;
+    let cwaBookLink = normalizedStoredLink;
+    if (request.cwa_book_link && normalizedStoredLink !== request.cwa_book_link) {
+      updateRequestCwaState(request.id, new Date().toISOString(), !!request.cwa_available, normalizedStoredLink);
+    }
     const shouldResolveCwaLink = (request.cwa_available || request.status === 'completed') && !cwaBookLink;
     if (shouldResolveCwaLink) {
       const resolved = await checkCwaAvailability(request.book_title, request.author);
@@ -2144,7 +2230,7 @@ app.post('/api/request-status',
         cwaBookLink = resolved.bookLink;
         updateRequestCwaState(request.id, new Date().toISOString(), true, cwaBookLink);
       } else {
-        cwaBookLink = buildCwaSearchLink(request.book_title);
+        cwaBookLink = buildCwaSearchLink(request.book_title, request.author);
       }
     }
 
@@ -3583,7 +3669,7 @@ app.post('/api/admin/sync-cwa', authenticateToken, async (req, res) => {
     const cwaCheck = await checkCwaAvailability(request.book_title, request.author);
     
     if (cwaCheck.available && !request.cwa_available) {
-      const cwaLink = cwaCheck.bookLink || buildCwaSearchLink(request.book_title);
+      const cwaLink = cwaCheck.bookLink || buildCwaSearchLink(request.book_title, request.author);
       updateRequestCwaState(request.id, now, true, cwaLink);
       db.prepare("UPDATE requests SET status = 'completed', updated_at = ? WHERE id = ?").run(now, request.id);
       db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
@@ -3689,7 +3775,7 @@ app.listen(PORT, () => {
           const cwaCheck = await checkCwaAvailability(request.book_title, request.author);
           
           if (cwaCheck.available && !request.cwa_available) {
-            const cwaLink = cwaCheck.bookLink || buildCwaSearchLink(request.book_title);
+            const cwaLink = cwaCheck.bookLink || buildCwaSearchLink(request.book_title, request.author);
             updateRequestCwaState(request.id, now, true, cwaLink);
             db.prepare("UPDATE requests SET status = 'completed', updated_at = ? WHERE id = ?").run(now, request.id);
             db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
