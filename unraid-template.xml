@@ -92,6 +92,11 @@
       <Mode/>
     </Variable>
     <Variable>
+      <Value>/api/v1</Value>
+      <Name>READARR_API_PREFIX</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
       <Value></Value>
       <Name>READARR_QUALITY_PROFILE_ID</Name>
       <Mode/>
@@ -104,6 +109,26 @@
     <Variable>
       <Value></Value>
       <Name>READARR_ROOT_FOLDER</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>READARR_METADATA_PROFILE_ID_EPUB</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>READARR_METADATA_PROFILE_ID_PDF</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>READARR_METADATA_PROFILE_ID_MOBI</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value></Value>
+      <Name>READARR_METADATA_PROFILE_ID_AUDIOBOOK</Name>
       <Mode/>
     </Variable>
     <Variable>
@@ -163,9 +188,14 @@
   <Config Name="Turnstile Secret" Target="TURNSTILE_SECRET_KEY" Default="" Mode="" Description="Cloudflare Turnstile secret key" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
   <Config Name="Readarr URL" Target="READARR_URL" Default="" Mode="" Description="Readarr/Chaptarr server URL (e.g., http://192.168.1.100:8787)" Type="Variable" Display="always" Required="false" Mask="false"></Config>
   <Config Name="Readarr API Key" Target="READARR_API_KEY" Default="" Mode="" Description="Readarr/Chaptarr API key" Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="Readarr API Prefix" Target="READARR_API_PREFIX" Default="/api/v1" Mode="" Description="API prefix used for Readarr/Chaptarr endpoints" Type="Variable" Display="advanced" Required="false" Mask="false">/api/v1</Config>
   <Config Name="Readarr Quality Profile ID" Target="READARR_QUALITY_PROFILE_ID" Default="" Mode="" Description="Optional default quality profile ID in Readarr/Chaptarr" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
   <Config Name="Readarr Metadata Profile ID" Target="READARR_METADATA_PROFILE_ID" Default="" Mode="" Description="Optional metadata profile ID in Readarr/Chaptarr" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
   <Config Name="Readarr Root Folder" Target="READARR_ROOT_FOLDER" Default="" Mode="" Description="Optional root folder override in Readarr/Chaptarr" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Readarr Metadata Profile EPUB" Target="READARR_METADATA_PROFILE_ID_EPUB" Default="" Mode="" Description="Optional EPUB metadata profile ID in Readarr/Chaptarr" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Readarr Metadata Profile PDF" Target="READARR_METADATA_PROFILE_ID_PDF" Default="" Mode="" Description="Optional PDF metadata profile ID in Readarr/Chaptarr" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Readarr Metadata Profile MOBI" Target="READARR_METADATA_PROFILE_ID_MOBI" Default="" Mode="" Description="Optional MOBI metadata profile ID in Readarr/Chaptarr" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Readarr Metadata Profile Audiobook" Target="READARR_METADATA_PROFILE_ID_AUDIOBOOK" Default="" Mode="" Description="Optional audiobook metadata profile ID in Readarr/Chaptarr" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
   <Config Name="CWA URL" Target="CWA_URL" Default="" Mode="" Description="Calibre Web Automated URL" Type="Variable" Display="always" Required="false" Mask="false"></Config>
   <Config Name="CWA Username" Target="CWA_USERNAME" Default="" Mode="" Description="CWA username for OPDS access" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
   <Config Name="CWA Password" Target="CWA_PASSWORD" Default="" Mode="" Description="CWA password for OPDS access" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>

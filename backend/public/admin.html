@@ -599,6 +599,11 @@
               <option value="audiobook">Audiobook</option>
             </select>
           </div>
+          <div>
+            <label style="display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 5px;">Candidate Foreign Book ID (optional)</label>
+            <input type="text" id="testCandidateForeignBookId" placeholder="Paste foreignBookId from a result to force selection" style="width: 100%; padding: 12px; background: var(--bg-input); border: 1px solid var(--border-medium); border-radius: var(--radius-md); color: var(--text-primary);">
+            <div style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">When set, diagnostics payload/add test uses that exact lookup candidate when available.</div>
+          </div>
           <label style="display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-muted);">
             <input type="checkbox" id="testAttemptAdd" style="width: 16px; height: 16px;">
             Attempt live add test (posts to Readarr and may add the book)
@@ -865,6 +870,7 @@
       document.getElementById('testAuthor').value = '';
       document.getElementById('testIsbn').value = '';
       document.getElementById('testFormat').value = 'any';
+      document.getElementById('testCandidateForeignBookId').value = '';
       document.getElementById('testAttemptAdd').checked = false;
       document.getElementById('readarrTestResults').innerHTML = `
         <div style="text-align: center; padding: 40px; color: var(--text-muted);">
@@ -885,6 +891,7 @@
       const author = document.getElementById('testAuthor').value.trim();
       const isbn = document.getElementById('testIsbn').value.trim();
       const format = document.getElementById('testFormat').value;
+      const candidateForeignBookId = document.getElementById('testCandidateForeignBookId').value.trim();
       const attemptAdd = document.getElementById('testAttemptAdd').checked;
       
       if (!requestId && (!title || !author)) {
@@ -898,7 +905,7 @@
       try {
         const response = await apiCall('/api/admin/readarr/test', {
           method: 'POST',
-          body: JSON.stringify({ requestId, title, author, isbn, format, attemptAdd })
+          body: JSON.stringify({ requestId, title, author, isbn, format, attemptAdd, candidateForeignBookId })
         });
         const result = await response.json();
         
@@ -946,8 +953,21 @@
                 Source Request: ${escapeHtml(result.diagnostics.requestSource.id)} (${escapeHtml(result.diagnostics.requestSource.status || 'unknown')})
               </div>
             ` : ''}
+            ${result.selectedCandidate ? `
+              <div style="margin-top: 8px; font-size: 12px; color: var(--text-muted);">
+                Selected Candidate: ${escapeHtml(result.selectedCandidate.title || 'n/a')} (${escapeHtml(result.selectedCandidate.foreignBookId || 'no foreignBookId')})
+              </div>
+            ` : ''}
           </div>
         `;
+
+        if (result.selectionWarning) {
+          html += `
+            <div style="background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 10px; padding: 12px; margin-bottom: 15px; color: #fbbf24; font-size: 12px;">
+              ⚠️ ${escapeHtml(result.selectionWarning)}
+            </div>
+          `;
+        }
         
         if (result.results.length === 0) {
           html += `
@@ -977,6 +997,11 @@
                     ${book.releaseDate ? `<div style="font-size: 12px; color: var(--text-muted);">Released: ${book.releaseDate.split('T')[0]}</div>` : ''}
                     ${book.overview ? `<div style="font-size: 12px; color: var(--text-muted); margin-top: 8px; line-height: 1.4;">${escapeHtml(book.overview)}</div>` : ''}
                     <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">GoodReads ID: ${book.foreignBookId}</div>
+                    ${book.foreignBookId ? `
+                      <div style="margin-top: 8px;">
+                        <button class="btn btn-secondary" data-action="use-readarr-candidate" data-foreign-book-id="${encodeURIComponent(book.foreignBookId)}" style="font-size: 11px; padding: 6px 10px;">Use This Candidate</button>
+                      </div>
+                    ` : ''}
                     ${book.formatHints ? `
                       <div style="font-size: 11px; color: var(--text-muted); margin-top: 6px;">
                         Type: ${escapeHtml(book.formatHints.bookType || book.formatHints.mediaType || book.formatHints.bookFormat || 'unknown')}
@@ -1054,6 +1079,11 @@
         const jsonOutput = document.getElementById('readarrJsonOutput');
         if (jsonOutput) {
           jsonOutput.value = JSON.stringify(result, null, 2);
+        }
+
+        const candidateInput = document.getElementById('testCandidateForeignBookId');
+        if (candidateInput && result.selectedCandidate?.foreignBookId) {
+          candidateInput.value = result.selectedCandidate.foreignBookId;
         }
         
       } catch (error) {
@@ -1176,6 +1206,20 @@
       } catch {
         showToast('Download failed', 'error');
       }
+    }
+
+    function useReadarrCandidate(encodedForeignBookId) {
+      const candidateInput = document.getElementById('testCandidateForeignBookId');
+      if (!candidateInput) return;
+
+      const decoded = decodeURIComponent(encodedForeignBookId || '').trim();
+      if (!decoded) {
+        showToast('Selected result has no foreignBookId', 'error');
+        return;
+      }
+
+      candidateInput.value = decoded;
+      showToast('Candidate locked for next diagnostics run', 'success');
     }
 
     async function completeAllInProgress() {
@@ -1740,6 +1784,8 @@
         deleteRequest(target.dataset.id);
       } else if (target.matches('[data-action="force-readarr"]')) {
         forceAddToReadarr(target.dataset.id);
+      } else if (target.matches('[data-action="use-readarr-candidate"]')) {
+        useReadarrCandidate(target.dataset.foreignBookId || '');
       } else if (target.matches('#updateStatusBtn')) {
         updateStatus(target.dataset.id);
       }

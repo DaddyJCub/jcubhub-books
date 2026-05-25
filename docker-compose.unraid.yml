@@ -27,9 +27,14 @@ services:
       # Readarr Integration (optional)
       - READARR_URL=http://readarr:8787
       - READARR_API_KEY=
+      - READARR_API_PREFIX=/api/v1
       - READARR_QUALITY_PROFILE_ID=
       - READARR_METADATA_PROFILE_ID=
       - READARR_ROOT_FOLDER=
+      - READARR_METADATA_PROFILE_ID_EPUB=
+      - READARR_METADATA_PROFILE_ID_PDF=
+      - READARR_METADATA_PROFILE_ID_MOBI=
+      - READARR_METADATA_PROFILE_ID_AUDIOBOOK=
       # CWA Integration (optional)
       - CWA_URL=https://cwa.jcubhub.com
       - CWA_USERNAME=
