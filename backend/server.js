@@ -1749,9 +1749,18 @@ async function addBookToReadarr(bookData) {
       bookData.bookTitle,
       bookData.author,
       bookData.isbn,
-      { preferredFormat: effectiveFormat }
+      {
+        preferredFormat: effectiveFormat,
+        excludeAudiobook: effectiveFormat !== 'audiobook'
+      }
     );
     if (!searchResult) {
+      if (effectiveFormat !== 'audiobook') {
+        return {
+          success: false,
+          error: 'Chaptarr lookup returned only audiobook/companion candidates for this request. Manual review is required.'
+        };
+      }
       return { success: false, error: 'Book not found in Readarr' };
     }
     

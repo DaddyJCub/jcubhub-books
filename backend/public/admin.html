@@ -612,6 +612,29 @@
             <button class="btn btn-primary" id="runReadarrTestBtn">🧪 Run Diagnostics</button>
             <button class="btn btn-secondary" id="downloadReadarrSnapshotBtn">🛰️ Download API Snapshot</button>
           </div>
+          <details style="border: 1px solid var(--border-light); border-radius: 12px; padding: 12px; background: rgba(255,255,255,0.02);">
+            <summary style="cursor: pointer; color: var(--text-primary); font-weight: 600;">📋 Batch Diagnostics Runner</summary>
+            <div style="margin-top: 12px; display: grid; gap: 10px;">
+              <div style="font-size: 12px; color: var(--text-muted);">
+                Run preset ebook checks or paste additional test lines in this format:<br>
+                <span style="font-family: 'Consolas','Courier New',monospace;">Title | Author | ISBN(optional) | format(optional)</span><br>
+                <span style="font-family: 'Consolas','Courier New',monospace;">request:REQUEST_ID | format(optional)</span>
+              </div>
+              <textarea id="readarrBatchCases" placeholder="Recursion | Blake Crouch | 9781524759797 | epub
+Project Hail Mary | Andy Weir | | epub
+request:BR-1234567890-abc123 | epub" style="width: 100%; min-height: 120px; resize: vertical; padding: 10px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); border-radius: 8px; color: var(--text-primary); font-family: 'Consolas', 'Courier New', monospace; font-size: 12px;"></textarea>
+              <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted);">
+                <input type="checkbox" id="readarrBatchIncludeRaw" style="width: 14px; height: 14px;">
+                Include raw lookup preview in batch API responses (slower, larger output)
+              </label>
+              <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                <button class="btn btn-secondary" id="runReadarrEbookSuiteBtn">📚 Run Ebook Suite</button>
+                <button class="btn btn-secondary" id="runReadarrCustomBatchBtn">🧪 Run Custom Batch</button>
+                <button class="btn btn-secondary" id="copyReadarrBatchOutputBtn">📋 Copy Batch Output</button>
+              </div>
+              <textarea id="readarrBatchOutput" readonly placeholder="Batch output will appear here. This block is formatted for easy paste into chat." style="width: 100%; min-height: 180px; resize: vertical; padding: 10px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); border-radius: 8px; color: var(--text-primary); font-family: 'Consolas', 'Courier New', monospace; font-size: 12px;"></textarea>
+            </div>
+          </details>
         </div>
         <div id="readarrTestResults"></div>
       </div>
@@ -872,6 +895,14 @@
       document.getElementById('testFormat').value = 'any';
       document.getElementById('testCandidateForeignBookId').value = '';
       document.getElementById('testAttemptAdd').checked = false;
+      const batchCasesEl = document.getElementById('readarrBatchCases');
+      if (batchCasesEl && !String(batchCasesEl.value || '').trim()) {
+        const defaults = getDefaultReadarrEbookSuiteCases();
+        batchCasesEl.value = defaults
+          .map(item => `${item.title} | ${item.author} | ${item.isbn || ''} | ${item.format || 'epub'}`)
+          .join('\n');
+      }
+      setReadarrBatchOutput('');
       document.getElementById('readarrTestResults').innerHTML = `
         <div style="text-align: center; padding: 40px; color: var(--text-muted);">
           <p>Enter a Request ID or book details, then run diagnostics.</p>
@@ -932,6 +963,8 @@
           `;
           return;
         }
+
+        const sourceRequestId = String(result.diagnostics?.requestSource?.id || '').trim();
         
         // Build results display
         let html = `
@@ -998,8 +1031,9 @@
                     ${book.overview ? `<div style="font-size: 12px; color: var(--text-muted); margin-top: 8px; line-height: 1.4;">${escapeHtml(book.overview)}</div>` : ''}
                     <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px;">GoodReads ID: ${book.foreignBookId}</div>
                     ${book.foreignBookId ? `
-                      <div style="margin-top: 8px;">
+                      <div style="margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;">
                         <button class="btn btn-secondary" data-action="use-readarr-candidate" data-foreign-book-id="${encodeURIComponent(book.foreignBookId)}" style="font-size: 11px; padding: 6px 10px;">Use This Candidate</button>
+                        ${sourceRequestId ? `<button class="btn btn-secondary" data-action="add-readarr-candidate" data-request-id="${encodeURIComponent(sourceRequestId)}" data-foreign-book-id="${encodeURIComponent(book.foreignBookId)}" style="font-size: 11px; padding: 6px 10px;">Add Candidate To Request</button>` : ''}
                       </div>
                     ` : ''}
                     ${book.formatHints ? `
@@ -1093,6 +1127,293 @@
             <p style="color: #fca5a5; margin-top: 10px;">Error: ${error.message}</p>
           </div>
         `;
+      }
+    }
+
+    function getDefaultReadarrEbookSuiteCases() {
+      return [
+        { kind: 'book', title: 'Recursion', author: 'Blake Crouch', isbn: '9781524759797', format: 'epub', label: 'Recursion / Blake Crouch' },
+        { kind: 'book', title: 'The Martian', author: 'Andy Weir', isbn: '', format: 'epub', label: 'The Martian / Andy Weir' },
+        { kind: 'book', title: 'Project Hail Mary', author: 'Andy Weir', isbn: '', format: 'epub', label: 'Project Hail Mary / Andy Weir' },
+        { kind: 'book', title: 'The Body Keeps the Score', author: 'Bessel van der Kolk', isbn: '', format: 'epub', label: 'The Body Keeps the Score / Bessel van der Kolk' }
+      ];
+    }
+
+    function parseReadarrBatchCases(rawText) {
+      const cases = [];
+      const errors = [];
+      const lines = String(rawText || '').split(/\r?\n/);
+
+      lines.forEach((lineRaw, index) => {
+        const line = String(lineRaw || '').trim();
+        if (!line || line.startsWith('#')) return;
+
+        const parts = line.split('|').map(part => part.trim());
+        if (!parts.length) return;
+
+        if (/^request\s*:/i.test(parts[0])) {
+          const requestId = parts[0].replace(/^request\s*:/i, '').trim();
+          const format = String(parts[1] || 'epub').toLowerCase();
+          if (!requestId) {
+            errors.push(`Line ${index + 1}: missing request id`);
+            return;
+          }
+          cases.push({
+            kind: 'request',
+            requestId,
+            format,
+            label: `request:${requestId}`
+          });
+          return;
+        }
+
+        if (parts.length < 2) {
+          errors.push(`Line ${index + 1}: expected "Title | Author | ISBN(optional) | format(optional)"`);
+          return;
+        }
+
+        const title = String(parts[0] || '').trim();
+        const author = String(parts[1] || '').trim();
+        const isbn = String(parts[2] || '').trim();
+        const format = String(parts[3] || 'epub').toLowerCase();
+
+        if (!title || !author) {
+          errors.push(`Line ${index + 1}: title and author are required`);
+          return;
+        }
+
+        cases.push({
+          kind: 'book',
+          title,
+          author,
+          isbn,
+          format,
+          label: `${title} / ${author}`
+        });
+      });
+
+      return { cases, errors };
+    }
+
+    function scoreReadarrBatchCase(result, format) {
+      const normalizedFormat = String(format || 'any').toLowerCase();
+      const selected = result?.selectedCandidate || null;
+      const likelyAudioSelected = !!selected?.likelyAudiobook;
+      const nonAudioCount = Array.isArray(result?.results)
+        ? result.results.filter(item => !item?.likelyAudiobook).length
+        : 0;
+
+      if (normalizedFormat === 'audiobook') {
+        return {
+          passed: !!result?.success,
+          reason: result?.success ? 'Audiobook search succeeded.' : 'Audiobook search failed.'
+        };
+      }
+
+      if (!result?.success) {
+        return {
+          passed: false,
+          reason: result?.message || result?.error || 'Search failed'
+        };
+      }
+
+      if (likelyAudioSelected) {
+        return {
+          passed: false,
+          reason: 'Selected candidate is likely audiobook.'
+        };
+      }
+
+      if (nonAudioCount === 0) {
+        return {
+          passed: false,
+          reason: 'No non-audiobook candidates in top results.'
+        };
+      }
+
+      return {
+        passed: true,
+        reason: `Selected non-audiobook candidate; non-audio candidates in top results: ${nonAudioCount}.`
+      };
+    }
+
+    function buildReadarrBatchOutput(label, runItems) {
+      const nowIso = new Date().toISOString();
+      const total = runItems.length;
+      const passed = runItems.filter(item => item.passed).length;
+      const failed = total - passed;
+
+      const lines = [];
+      lines.push('=== READARR EBOOK BATCH REPORT ===');
+      lines.push(`Generated: ${nowIso}`);
+      lines.push(`Batch: ${label}`);
+      lines.push(`Total: ${total} | Passed: ${passed} | Failed: ${failed}`);
+      lines.push('');
+
+      runItems.forEach((item, idx) => {
+        lines.push(`[${idx + 1}] ${item.label}`);
+        lines.push(`Input: ${item.inputSummary}`);
+        lines.push(`HTTP: ${item.httpStatus} | Success: ${item.success} | TotalResults: ${item.totalResults}`);
+        lines.push(`Selected: ${item.selectedSummary}`);
+        lines.push(`Result: ${item.passed ? 'PASS' : 'FAIL'} - ${item.reason}`);
+        if (item.message) {
+          lines.push(`Message: ${item.message}`);
+        }
+        lines.push('');
+      });
+
+      return lines.join('\n');
+    }
+
+    function setReadarrBatchOutput(text) {
+      const output = document.getElementById('readarrBatchOutput');
+      if (!output) return;
+      output.value = text;
+      window.lastReadarrBatchOutput = text;
+    }
+
+    async function runReadarrBatch(cases, label) {
+      if (!Array.isArray(cases) || cases.length === 0) {
+        showToast('No batch cases to run', 'error');
+        return;
+      }
+
+      const includeRawResults = document.getElementById('readarrBatchIncludeRaw')?.checked === true;
+      const resultsDiv = document.getElementById('readarrTestResults');
+      resultsDiv.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+      setReadarrBatchOutput(`Running ${cases.length} diagnostics case(s)...`);
+
+      const runItems = [];
+      for (let i = 0; i < cases.length; i++) {
+        const c = cases[i];
+        const payload = {
+          format: c.format || 'epub',
+          attemptAdd: false,
+          includeRawResults,
+          forceRefreshConfig: i === 0
+        };
+
+        if (c.kind === 'request') {
+          payload.requestId = c.requestId;
+        } else {
+          payload.title = c.title;
+          payload.author = c.author;
+          payload.isbn = c.isbn || '';
+        }
+
+        let statusCode = 0;
+        let body = null;
+        let message = '';
+        let success = false;
+
+        try {
+          const response = await apiCall('/api/admin/readarr/test', {
+            method: 'POST',
+            body: JSON.stringify(payload)
+          });
+          statusCode = response.status;
+          body = await response.json();
+          success = !!body?.success;
+          message = body?.message || body?.error || '';
+        } catch (error) {
+          statusCode = 0;
+          body = null;
+          success = false;
+          message = error.message;
+        }
+
+        const selected = body?.selectedCandidate || null;
+        const selectedSummary = selected
+          ? `${selected.title || 'n/a'} | ${selected.foreignBookId || 'no-id'} | likelyAudio=${selected.likelyAudiobook ? 'yes' : 'no'}`
+          : 'none';
+        const score = scoreReadarrBatchCase(body, c.format);
+        const inputSummary = c.kind === 'request'
+          ? `requestId=${c.requestId} format=${c.format || 'epub'}`
+          : `title=${c.title} | author=${c.author} | isbn=${c.isbn || '(none)'} | format=${c.format || 'epub'}`;
+
+        runItems.push({
+          label: c.label || (c.kind === 'request' ? c.requestId : `${c.title} / ${c.author}`),
+          inputSummary,
+          httpStatus: statusCode || 'n/a',
+          success,
+          totalResults: body?.totalResults ?? 0,
+          selectedSummary,
+          passed: score.passed,
+          reason: score.reason,
+          message
+        });
+      }
+
+      const outputText = buildReadarrBatchOutput(label, runItems);
+      setReadarrBatchOutput(outputText);
+      resultsDiv.innerHTML = `
+        <div style="background: rgba(14, 165, 233, 0.1); border: 1px solid rgba(14, 165, 233, 0.35); border-radius: 12px; padding: 16px;">
+          <div style="font-weight: 600; color: #38bdf8; margin-bottom: 8px;">Batch run complete: ${escapeHtml(label)}</div>
+          <div style="font-size: 12px; color: var(--text-muted);">Cases: ${runItems.length} | Passed: ${runItems.filter(item => item.passed).length} | Failed: ${runItems.filter(item => !item.passed).length}</div>
+          <div style="margin-top: 10px; font-size: 12px; color: var(--text-muted);">Use "Copy Batch Output" and paste directly here.</div>
+        </div>
+      `;
+      showToast(`Batch complete: ${runItems.length} case(s)`, 'success');
+    }
+
+    async function runReadarrEbookSuite() {
+      const defaults = getDefaultReadarrEbookSuiteCases();
+      await runReadarrBatch(defaults, 'Default Ebook Suite');
+    }
+
+    async function runReadarrCustomBatch() {
+      const rawText = document.getElementById('readarrBatchCases')?.value || '';
+      const parsed = parseReadarrBatchCases(rawText);
+      if (parsed.errors.length > 0) {
+        setReadarrBatchOutput(`Input errors:\n- ${parsed.errors.join('\n- ')}`);
+        showToast('Fix batch input errors first', 'error');
+        return;
+      }
+      if (parsed.cases.length === 0) {
+        showToast('Enter at least one custom batch case', 'error');
+        return;
+      }
+      await runReadarrBatch(parsed.cases, 'Custom Batch');
+    }
+
+    function copyReadarrBatchOutput() {
+      const output = String(window.lastReadarrBatchOutput || '').trim();
+      if (!output) {
+        showToast('No batch output to copy', 'error');
+        return;
+      }
+
+      const fallbackCopy = () => {
+        try {
+          const textarea = document.createElement('textarea');
+          textarea.value = output;
+          textarea.setAttribute('readonly', '');
+          textarea.style.position = 'fixed';
+          textarea.style.top = '-1000px';
+          textarea.style.left = '-1000px';
+          document.body.appendChild(textarea);
+          textarea.focus();
+          textarea.select();
+          const copied = document.execCommand('copy');
+          document.body.removeChild(textarea);
+          if (copied) {
+            showToast('Batch output copied!', 'success');
+          } else {
+            window.prompt('Copy batch output (Ctrl+C, Enter):', output);
+            showToast('Clipboard blocked. Manual copy prompt opened.', '');
+          }
+        } catch {
+          window.prompt('Copy batch output (Ctrl+C, Enter):', output);
+          showToast('Clipboard blocked. Manual copy prompt opened.', '');
+        }
+      };
+
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(output)
+          .then(() => showToast('Batch output copied!', 'success'))
+          .catch(() => fallbackCopy());
+      } else {
+        fallbackCopy();
       }
     }
 
@@ -1453,6 +1774,10 @@
           <button class="btn btn-primary btn-full" id="updateStatusBtn" data-id="${req.id}">Update Status</button>
           
           <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--border-light);">
+            <button class="btn btn-secondary btn-full" data-action="manual-readarr-review" data-id="${req.id}" style="margin-bottom: 10px; background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);">
+              🧪 Manual Readarr Review
+            </button>
+            <p style="font-size: 0.75rem; color: var(--text-muted); margin: 0 0 8px 0; text-align: center;">Pick a specific lookup candidate before adding to Readarr</p>
             <button class="btn btn-secondary btn-full" data-action="force-readarr" data-id="${req.id}" style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);">
               📚 Force Add to Readarr
             </button>
@@ -1572,6 +1897,66 @@
         }
       } catch (error) {
         showToast('Failed to force add to Readarr', 'error');
+      }
+    }
+
+    async function manualReviewReadarr(id) {
+      try {
+        const response = await apiCall(`/api/admin/requests/${id}`);
+        if (!response.ok) {
+          showToast('Failed to load request for manual review', 'error');
+          return;
+        }
+
+        const req = await response.json();
+        testReadarr();
+        closeModal();
+
+        document.getElementById('testRequestId').value = req.id || '';
+        document.getElementById('testTitle').value = req.book_title || '';
+        document.getElementById('testAuthor').value = req.author || '';
+        document.getElementById('testIsbn').value = req.isbn || '';
+        document.getElementById('testFormat').value = (req.format || 'any').toLowerCase();
+        document.getElementById('testAttemptAdd').checked = false;
+
+        showToast('Manual review loaded. Choose a candidate and add it to this request.', 'success');
+        runReadarrTest();
+      } catch (error) {
+        showToast('Failed to open manual review', 'error');
+      }
+    }
+
+    async function addReadarrCandidateToRequest(encodedRequestId, encodedForeignBookId) {
+      const requestId = decodeURIComponent(encodedRequestId || '').trim();
+      const foreignBookId = decodeURIComponent(encodedForeignBookId || '').trim();
+
+      if (!requestId || !foreignBookId) {
+        showToast('Missing request or candidate ID', 'error');
+        return;
+      }
+
+      showToast('Adding selected candidate to request...', '');
+
+      try {
+        const response = await apiCall('/api/admin/readarr/add', {
+          method: 'POST',
+          body: JSON.stringify({
+            requestId,
+            candidateForeignBookId: foreignBookId
+          })
+        });
+
+        const result = await response.json();
+        if (response.ok && result.success) {
+          showToast('Selected candidate added to Readarr', 'success');
+          loadRequests();
+          loadStats();
+          window.lastReadarrTestResult = null;
+        } else {
+          showToast(result.error || 'Failed to add selected candidate', 'error');
+        }
+      } catch (error) {
+        showToast('Failed to add selected candidate', 'error');
       }
     }
 
@@ -1751,6 +2136,9 @@
     document.getElementById('readarrTestCloseBtn')?.addEventListener('click', closeReadarrTestModal);
     document.getElementById('runReadarrTestBtn')?.addEventListener('click', runReadarrTest);
     document.getElementById('downloadReadarrSnapshotBtn')?.addEventListener('click', downloadReadarrApiSnapshot);
+    document.getElementById('runReadarrEbookSuiteBtn')?.addEventListener('click', runReadarrEbookSuite);
+    document.getElementById('runReadarrCustomBatchBtn')?.addEventListener('click', runReadarrCustomBatch);
+    document.getElementById('copyReadarrBatchOutputBtn')?.addEventListener('click', copyReadarrBatchOutput);
     
     // Enter key in test modal
     document.getElementById('testIsbn')?.addEventListener('keypress', (e) => {
@@ -1784,8 +2172,12 @@
         deleteRequest(target.dataset.id);
       } else if (target.matches('[data-action="force-readarr"]')) {
         forceAddToReadarr(target.dataset.id);
+      } else if (target.matches('[data-action="manual-readarr-review"]')) {
+        manualReviewReadarr(target.dataset.id);
       } else if (target.matches('[data-action="use-readarr-candidate"]')) {
         useReadarrCandidate(target.dataset.foreignBookId || '');
+      } else if (target.matches('[data-action="add-readarr-candidate"]')) {
+        addReadarrCandidateToRequest(target.dataset.requestId || '', target.dataset.foreignBookId || '');
       } else if (target.matches('#updateStatusBtn')) {
         updateStatus(target.dataset.id);
       }
