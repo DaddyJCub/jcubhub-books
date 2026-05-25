@@ -355,13 +355,6 @@ function generateStatusToken() {
 const READARR_HTTP_TIMEOUT_MS = parseInt(process.env.READARR_HTTP_TIMEOUT_MS, 10) || 12000;
 const READARR_HTTP_RETRIES = parseInt(process.env.READARR_HTTP_RETRIES, 10) || 1;
 const READARR_CACHE_TTL_MS = parseInt(process.env.READARR_CACHE_TTL_MS, 10) || 5 * 60 * 1000;
-const READARR_API_PREFIX = (() => {
-  const raw = String(process.env.READARR_API_PREFIX || '/api/v1').trim();
-  if (!raw) return '/api/v1';
-
-  const withLeadingSlash = raw.startsWith('/') ? raw : `/${raw}`;
-  return withLeadingSlash.replace(/\/+$/, '');
-})();
 
 const readarrConfigCache = {
   qualityProfiles: null,
@@ -370,10 +363,18 @@ const readarrConfigCache = {
   fetchedAt: 0
 };
 
+const READARR_API_PREFIX = (() => {
+  const raw = String(process.env.READARR_API_PREFIX || '/api/v1').trim();
+  if (!raw) return '/api/v1';
+  const prefixed = raw.startsWith('/') ? raw : `/${raw}`;
+  return prefixed.replace(/\/+$/, '') || '/api/v1';
+})();
+
 function buildReadarrApiUrl(apiPath = '') {
   const base = String(process.env.READARR_URL || '').replace(/\/+$/, '');
-  const path = String(apiPath || '').trim();
-  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  const normalizedPath = String(apiPath || '').startsWith('/')
+    ? String(apiPath || '')
+    : `/${String(apiPath || '')}`;
   return `${base}${READARR_API_PREFIX}${normalizedPath}`;
 }
 
@@ -566,13 +567,19 @@ function buildCwaSearchLink(bookTitle, author = '') {
   const cwaBase = getCwaBaseUrl();
   if (!cwaBase) return null;
 
-  const queryText = [bookTitle, author].filter(Boolean).join(' ').trim() || String(bookTitle || '').trim();
+  // Title-only queries are significantly more reliable in many CWA instances.
+  // Keep the author argument for call-site compatibility but do not include it
+  // in the fallback search URL.
+  const titleQuery = String(bookTitle || '').trim();
+  const queryText = titleQuery || String(author || '').trim();
+  if (!queryText) return cwaBase;
+
   try {
-    const searchUrl = new URL('/search', cwaBase);
+    const searchUrl = new URL('/search/stored/', cwaBase);
     searchUrl.searchParams.set('query', queryText);
     return searchUrl.toString();
   } catch {
-    return `${cwaBase}/search?query=${encodeURIComponent(queryText)}`;
+    return `${cwaBase}/search/stored/?query=${encodeURIComponent(queryText)}`;
   }
 }
 
@@ -582,13 +589,13 @@ function normalizeCwaBookLink(rawLink) {
   if (!cwaBase) return null;
 
   const extractBookPath = pathname => {
-    const directBook = pathname.match(/\/book\/(\d+)\/?$/i)?.[1];
+    const directBook = pathname.match(/\/book\/([^\/?#]+)\/?$/i)?.[1];
     if (directBook) return `/book/${directBook}`;
 
-    const opdsBook = pathname.match(/\/opds\/(?:book|books)\/(\d+)\/?$/i)?.[1];
+    const opdsBook = pathname.match(/\/opds\/(?:book|books)\/([^\/?#]+)\/?$/i)?.[1];
     if (opdsBook) return `/book/${opdsBook}`;
 
-    const opdsDownload = pathname.match(/\/opds\/download\/(\d+)\//i)?.[1];
+    const opdsDownload = pathname.match(/\/opds\/download\/([^\/?#]+)\//i)?.[1];
     if (opdsDownload) return `/book/${opdsDownload}`;
 
     return null;
@@ -648,8 +655,8 @@ function parseCwaOpdsEntries(xml) {
     }
 
     const preferred =
-      links.find(link => /\/book\/\d+/i.test(link.href)) ||
-      links.find(link => /\/opds\/(?:book|books)\/\d+/i.test(link.href)) ||
+      links.find(link => /\/book\/[^\/?#]+/i.test(link.href)) ||
+      links.find(link => /\/opds\/(?:book|books)\/[^\/?#]+/i.test(link.href)) ||
       links.find(link => link.rel.includes('alternate') && link.type.includes('html')) ||
       links.find(link => link.rel.includes('alternate')) ||
       links.find(link => !link.href.includes('/opds/download/')) ||
@@ -786,10 +793,14 @@ async function checkCwaAvailability(bookTitle, author, isbn = '') {
       if (!entries.length) continue;
 
       const bestEntry = chooseBestCwaEntry(entries, bookTitle, author);
+      const directLinkEntries = entries.filter(entry => !!normalizeCwaBookLink(entry.bookHref));
+      const singleDirectLinkEntry = (!bestEntry && directLinkEntries.length === 1)
+        ? directLinkEntries[0]
+        : null;
       const isbnFallbackEntry = (!bestEntry && isbn && searchTerm === String(isbn).trim() && entries.length === 1)
         ? entries[0]
         : null;
-      const resolvedEntry = bestEntry || isbnFallbackEntry;
+      const resolvedEntry = bestEntry || singleDirectLinkEntry || isbnFallbackEntry;
       if (!resolvedEntry) {
         logger.debug('CWA OPDS had entries but no confident match', {
           bookTitle,
@@ -810,7 +821,7 @@ async function checkCwaAvailability(bookTitle, author, isbn = '') {
         isbn: isbn || null,
         found: true,
         searchTerm,
-        matchedVia: bestEntry ? 'scored_match' : 'isbn_single_result',
+        matchedVia: bestEntry ? 'scored_match' : singleDirectLinkEntry ? 'single_direct_link' : 'isbn_single_result',
         sourceUrl,
         entryCount: entries.length,
         matchedTitle: resolvedEntry.title || null,
@@ -850,8 +861,6 @@ function isAudioTaggedValue(value) {
 
 function isLikelyAudiobookResult(book) {
   const textRegex = /\b(ebook|e-book|epub|mobi|pdf|hardcover|paperback|print|book)\b/i;
-  const hasLocalEbookVariant = Array.isArray(book?.localEbookBooks) && book.localEbookBooks.length > 0;
-  const hasLocalAudiobookVariant = Array.isArray(book?.localAudiobookBooks) && book.localAudiobookBooks.length > 0;
 
   const primaryFields = [
     book?.bookType,
@@ -867,7 +876,6 @@ function isLikelyAudiobookResult(book) {
         edition?.bookFormat,
         edition?.mediaType,
         edition?.releaseType,
-        edition?.isEbook === true ? 'ebook' : null,
         edition?.title,
         edition?.moniker
       ]).filter(Boolean).map(v => String(v))
@@ -876,15 +884,6 @@ function isLikelyAudiobookResult(book) {
   const candidates = primaryFields.concat(editionFields);
   const hasAudio = candidates.some(isAudioTaggedValue);
   const hasText = candidates.some(value => textRegex.test(value));
-
-  // Chaptarr lookup can return mediaType=audiobook while still exposing local ebook variants.
-  // In that case, do not classify this as likely-audiobook for selection/scoring.
-  if (hasLocalEbookVariant) {
-    return false;
-  }
-  if (hasLocalAudiobookVariant && !hasLocalEbookVariant && !hasText) {
-    return true;
-  }
 
   if (hasAudio && !hasText) return true;
   if (!hasAudio && !hasText) return isAudioTaggedValue(String(book?.title || ''));
@@ -1026,22 +1025,14 @@ async function searchReadarr(bookTitle, author, isbn, options = {}) {
     const booksByKey = new Map();
 
     for (const queryTerm of querySet) {
-      const encoded = encodeURIComponent(queryTerm);
       logger.info('Readarr search', { searchQuery: queryTerm, usingIsbn: !!isbn });
-
-      const response = await fetchWithTimeout(buildReadarrApiUrl(`/book/lookup?term=${encoded}`), {
-        headers: {
-          'X-Api-Key': process.env.READARR_API_KEY
-        }
-      }, 'Readarr search');
-
-      if (!response.ok) {
-        logger.warn('Readarr search failed', { status: response.status, queryTerm });
+      const lookupResult = await lookupReadarrBooksByTerm(queryTerm, 'Readarr search');
+      if (!lookupResult.ok) {
+        logger.warn('Readarr search failed', { status: lookupResult.status, queryTerm });
         continue;
       }
 
-      const resultBooks = await response.json();
-      for (const book of resultBooks) {
+      for (const book of lookupResult.books) {
         const key = String(book?.foreignBookId || book?.titleSlug || `${book?.title || ''}|${book?.authorName || ''}`);
         if (!booksByKey.has(key)) {
           booksByKey.set(key, book);
@@ -1065,25 +1056,11 @@ async function searchReadarr(bookTitle, author, isbn, options = {}) {
     });
 
     if (books.length === 0) return null;
-    
-    // Try to find the best match instead of just returning first result
+
     const normalizedSearchTitle = bookTitle.toLowerCase().trim();
     const normalizedSearchAuthor = author.toLowerCase().trim();
-    
-    // Score each result for relevance
-    const scored = books.map(book => {
-      const details = scoreReadarrLookupResult(book, normalizedSearchTitle, normalizedSearchAuthor, preferredFormat);
-      return {
-        book,
-        score: details.score,
-        likelyAudiobook: details.likelyAudiobook,
-        companionTitle: isCompanionBookTitle(book?.title)
-      };
-    });
-    
-    // Sort by score descending and return best match
-    scored.sort((a, b) => b.score - a.score);
 
+    const scored = buildScoredReadarrEntries(books, normalizedSearchTitle, normalizedSearchAuthor, preferredFormat);
     let candidates = scored;
 
     if (excludeForeignBookId) {
@@ -1107,7 +1084,7 @@ async function searchReadarr(bookTitle, author, isbn, options = {}) {
         candidates = nonCompanion;
       }
     }
-    
+
     const bestMatch = candidates[0] || scored[0];
 
     if (preferredFormat !== 'audiobook' && bestMatch.companionTitle && bestMatch.score < 10) {
@@ -1581,14 +1558,10 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
   const metadataProfileId = selectMetadataProfileId(effectiveFormat, metadataProfiles);
   const rootFolderPath = selectRootFolderPath(effectiveFormat, rootFolders);
   const shouldStripAudiobookHints = effectiveFormat !== 'audiobook' || !!options.stripAudiobookMetadata;
-  const minimalPayload = options.minimalPayload === true;
   const payloadMediaType = effectiveFormat === 'audiobook' ? 'audiobook' : 'ebook';
   const audiobookSelected = payloadMediaType === 'audiobook';
   const ebookSelected = !audiobookSelected;
   const stripAudiobookFieldRegex = /^(audiobookrootfolderpath|audiobookqualityprofileid|audiobookmetadataprofileid|narratorprofileid|availablenarrators|narratorentity|narratornames|iswantednarrator)$/i;
-  const compactObject = source => Object.fromEntries(
-    Object.entries(source || {}).filter(([, value]) => value !== null && value !== undefined && value !== '')
-  );
 
   const stripAudiobookOnlyFieldsDeep = value => {
     if (!value || typeof value !== 'object') return;
@@ -1709,21 +1682,8 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
     };
   }
 
-  const minimalLookupFields = compactObject({
-    title: sanitizedSearchResult.title,
-    foreignBookId: sanitizedSearchResult.foreignBookId,
-    foreignEditionId: sanitizedSearchResult.foreignEditionId,
-    goodreadsBookId: sanitizedSearchResult.goodreadsBookId,
-    goodreadsWorkId: sanitizedSearchResult.goodreadsWorkId,
-    titleSlug: sanitizedSearchResult.titleSlug,
-    overview: sanitizedSearchResult.overview,
-    releaseDate: sanitizedSearchResult.releaseDate,
-    pageCount: sanitizedSearchResult.pageCount,
-    ratings: sanitizedSearchResult.ratings
-  });
-
   const bookToAdd = {
-    ...(minimalPayload ? minimalLookupFields : sanitizedSearchResult),
+    ...sanitizedSearchResult,
     qualityProfileId,
     metadataProfileId,
     rootFolderPath,
@@ -1744,7 +1704,7 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
     }
   };
 
-  if (authorForBook && !(minimalPayload && authorId > 0)) {
+  if (authorForBook) {
     bookToAdd.author = authorForBook;
   } else {
     delete bookToAdd.author;
@@ -1888,8 +1848,7 @@ async function addBookToReadarr(bookData) {
     } = buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, {
       stripAudiobookMetadata: !!bookData._stripAudiobookMetadata,
       resolvedAuthorId,
-      forceFullAuthorPayload: !!bookData._forceFullAuthorPayload,
-      minimalPayload: !!bookData._minimalPayload
+      forceFullAuthorPayload: !!bookData._forceFullAuthorPayload
     });
 
     if (resolvedAuthorId > 0) {
@@ -2003,22 +1962,6 @@ async function addBookToReadarr(bookData) {
       });
 
       const nullReferenceError = /object reference not set to an instance of an object/i.test(errorMessage || '');
-      if (nullReferenceError && !bookData._minimalPayloadRetryAttempted) {
-        logger.warn('Retrying Readarr add with minimal payload after null-reference error', {
-          bookTitle: bookData.bookTitle,
-          foreignBookId: searchResult.foreignBookId || null,
-          resolvedAuthorId
-        });
-
-        return addBookToReadarr({
-          ...bookData,
-          _forcedSearchResult: searchResult,
-          _minimalPayload: true,
-          _stripAudiobookMetadata: true,
-          _minimalPayloadRetryAttempted: true
-        });
-      }
-
       if (nullReferenceError && !bookData._nullRefRetryAttempted) {
         logger.warn('Retrying Readarr add with full author payload after null-reference error', {
           bookTitle: bookData.bookTitle,
@@ -2222,9 +2165,6 @@ app.get('/api/health', (req, res) => {
       turnstile: !!process.env.TURNSTILE_SECRET_KEY,
       readarr: !!(process.env.READARR_URL && process.env.READARR_API_KEY),
       cwa: !!(process.env.CWA_URL && process.env.CWA_USERNAME && process.env.CWA_PASSWORD)
-    },
-    readarr: {
-      apiPrefix: READARR_API_PREFIX
     },
     database: {
       totalRequests: requestCount.count,
@@ -3179,29 +3119,6 @@ app.get('/api/admin/readarr/queue', authenticateToken, async (req, res) => {
   }
 });
 
-// Force-refresh cached Readarr/Chaptarr config
-app.post('/api/admin/readarr/refresh-config', authenticateToken, async (req, res) => {
-  if (!process.env.READARR_URL || !process.env.READARR_API_KEY) {
-    return res.status(400).json({ success: false, error: 'Readarr not configured' });
-  }
-
-  try {
-    const config = await getReadarrConfig(true);
-    res.json({
-      success: true,
-      refreshedAt: new Date().toISOString(),
-      counts: {
-        qualityProfiles: config.qualityProfiles?.length || 0,
-        metadataProfiles: config.metadataProfiles?.length || 0,
-        rootFolders: config.rootFolders?.length || 0
-      }
-    });
-  } catch (error) {
-    logger.error('Readarr config refresh failed', { error: error.message });
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
 // Search book in Readarr
 app.get('/api/admin/readarr/search', authenticateToken, async (req, res) => {
   const { title, author } = req.query;
@@ -3246,8 +3163,8 @@ app.post('/api/admin/readarr/snapshot', authenticateToken, async (req, res) => {
 
   const headers = { 'X-Api-Key': process.env.READARR_API_KEY };
 
-  const safeFetchJson = async (apiPath, label) => {
-    const url = buildReadarrApiUrl(apiPath);
+  const safeFetchJson = async (endpoint, label) => {
+    const url = buildReadarrApiUrl(endpoint);
     try {
       const response = await fetchWithTimeout(url, { headers }, label);
       const rawText = await response.text();
@@ -3340,7 +3257,6 @@ app.post('/api/admin/readarr/snapshot', authenticateToken, async (req, res) => {
       hasCommand: routePaths.some(path => /\/command/i.test(path))
     }
   };
-  const routeDiscoveryUnavailable = !routesInfo.ok && [404, 405].includes(routesInfo.statusCode);
 
   let lookup = {
     included: false,
@@ -3435,11 +3351,8 @@ app.post('/api/admin/readarr/snapshot', authenticateToken, async (req, res) => {
   if (lookup.topResults[0]?.likelyAudiobook && effectiveFormat !== 'audiobook') {
     recommendations.push('Top lookup result appears audiobook-oriented; consider adding searchTermOverride with ebook hints.');
   }
-  if (!routeDiscoveryUnavailable && !routeSummary.capabilities.hasBookAdd) {
+  if (!routeSummary.capabilities.hasBookAdd) {
     recommendations.push(`Route list does not clearly expose ${READARR_API_PREFIX}/book add endpoint.`);
-  }
-  if (routeDiscoveryUnavailable) {
-    recommendations.push('Route discovery endpoint is unavailable on this Chaptarr build; endpoint compatibility inferred from direct calls.');
   }
 
   return res.json({
@@ -3447,7 +3360,6 @@ app.post('/api/admin/readarr/snapshot', authenticateToken, async (req, res) => {
     generatedAt: new Date().toISOString(),
     readarr: {
       url: process.env.READARR_URL,
-      apiPrefix: READARR_API_PREFIX,
       systemStatus: {
         ok: statusInfo.ok,
         statusCode: statusInfo.statusCode,
@@ -3501,7 +3413,6 @@ app.post('/api/admin/readarr/snapshot', authenticateToken, async (req, res) => {
       }
     },
     envMapping: {
-      apiPrefix: READARR_API_PREFIX,
       quality: {
         default: parsePositiveInt(process.env.READARR_QUALITY_PROFILE_ID),
         epub: parsePositiveInt(process.env.READARR_QUALITY_PROFILE_ID_EPUB),
@@ -3593,6 +3504,7 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
     const rootFolderPath = selectRootFolderPath(effectiveFormat, readarrConfig.rootFolders);
 
     const rawQuery = effectiveIsbn ? effectiveIsbn : `${effectiveAuthor} ${effectiveTitle}`;
+    const searchQuery = encodeURIComponent(rawQuery);
 
     logger.info('Test Readarr search', {
       title: effectiveTitle,
@@ -3605,23 +3517,25 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
       requestId: sourceRequest?.id || null
     });
 
-    const lookupResult = await lookupReadarrBooksByTerm(rawQuery, 'Readarr test search');
+    const searchResponse = await fetchWithTimeout(buildReadarrApiUrl(`/book/lookup?term=${searchQuery}`), {
+      headers: { 'X-Api-Key': process.env.READARR_API_KEY }
+    }, 'Readarr test search');
 
-    if (!lookupResult.ok) {
+    if (!searchResponse.ok) {
       return res.json({
         success: false,
-        message: `Readarr search failed: ${lookupResult.status}`,
+        message: `Readarr search failed: ${searchResponse.status}`,
         configured: true,
         readarrVersion: readarrStatus.version,
         diagnostics: {
-          searchStatusCode: lookupResult.status,
-          searchStatusText: lookupResult.statusText,
+          searchStatusCode: searchResponse.status,
+          searchStatusText: searchResponse.statusText,
           selectedProfiles: { qualityProfileId, metadataProfileId, rootFolderPath }
         }
       });
     }
 
-    const books = lookupResult.books;
+    const books = await searchResponse.json();
     const normalizedSearchTitle = effectiveTitle.toLowerCase().trim();
     const normalizedSearchAuthor = effectiveAuthor.toLowerCase().trim();
 
