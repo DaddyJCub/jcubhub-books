@@ -859,15 +859,56 @@ function isAudioTaggedValue(value) {
   return /\b(audiobook|audio\s*book|audio)\b/i.test(String(value || ''));
 }
 
-function isLikelyAudiobookResult(book) {
-  const textRegex = /\b(ebook|e-book|epub|mobi|pdf|hardcover|paperback|print|book)\b/i;
+function isTextTaggedValue(value) {
+  return /\b(ebook|e-book|epub|mobi|pdf|kindle|text)\b/i.test(String(value || ''));
+}
+
+function hasReadarrEbookSignals(book) {
+  const hasLocalEbookVariant = Array.isArray(book?.localEbookBooks) && book.localEbookBooks.length > 0;
+  if (hasLocalEbookVariant) return true;
 
   const primaryFields = [
     book?.bookType,
     book?.type,
     book?.mediaType,
     book?.bookFormat,
-    book?.releaseType
+    book?.releaseType,
+    book?.title,
+    book?.moniker,
+    book?.publisher,
+    book?.overview,
+    book?.description
+  ].filter(Boolean).map(v => String(v));
+
+  const editionFields = Array.isArray(book?.editions)
+    ? book.editions.flatMap(edition => [
+        edition?.isEbook === true ? 'ebook' : null,
+        edition?.format,
+        edition?.bookFormat,
+        edition?.mediaType,
+        edition?.releaseType,
+        edition?.title,
+        edition?.moniker
+      ]).filter(Boolean).map(v => String(v))
+    : [];
+
+  return primaryFields.concat(editionFields).some(isTextTaggedValue);
+}
+
+function hasReadarrAudiobookSignals(book) {
+  const hasLocalAudiobookVariant = Array.isArray(book?.localAudiobookBooks) && book.localAudiobookBooks.length > 0;
+  if (hasLocalAudiobookVariant) return true;
+
+  const primaryFields = [
+    book?.bookType,
+    book?.type,
+    book?.mediaType,
+    book?.bookFormat,
+    book?.releaseType,
+    book?.title,
+    book?.moniker,
+    book?.overview,
+    book?.description
   ].filter(Boolean).map(v => String(v));
 
   const editionFields = Array.isArray(book?.editions)
@@ -881,13 +922,23 @@ function isLikelyAudiobookResult(book) {
       ]).filter(Boolean).map(v => String(v))
     : [];
 
-  const candidates = primaryFields.concat(editionFields);
-  const hasAudio = candidates.some(isAudioTaggedValue);
-  const hasText = candidates.some(value => textRegex.test(value));
+  return primaryFields.concat(editionFields).some(isAudioTaggedValue);
+}
 
-  if (hasAudio && !hasText) return true;
-  if (!hasAudio && !hasText) return isAudioTaggedValue(String(book?.title || ''));
-  return false;
+function isLikelyAudiobookResult(book) {
+  const hasEbookSignals = hasReadarrEbookSignals(book);
+  const hasAudiobookSignals = hasReadarrAudiobookSignals(book);
+
+  // Chaptarr can return mixed records; if ebook signals exist, do not classify as audiobook-only.
+  if (hasEbookSignals) {
+    return false;
+  }
+
+  if (hasAudiobookSignals) {
+    return true;
+  }
+
+  return isAudioTaggedValue(String(book?.title || ''));
 }
 
 function isCompanionBookTitle(title) {
@@ -913,6 +964,7 @@ function scoreReadarrLookupResult(book, normalizedSearchTitle, normalizedSearchA
   const bookTitleLower = (book.title || '').toLowerCase();
   const bookAuthorLower = (book.authorName || '').toLowerCase();
   const likelyAudiobook = isLikelyAudiobookResult(book);
+  const hasEbookSignals = hasReadarrEbookSignals(book);
   let score = 0;
   const scoreBreakdown = [];
 
@@ -943,16 +995,30 @@ function scoreReadarrLookupResult(book, normalizedSearchTitle, normalizedSearchA
     if (likelyAudiobook) {
       score += 35;
       scoreBreakdown.push('+35 audiobook preferred');
+      if (hasEbookSignals) {
+        score -= 15;
+        scoreBreakdown.push('-15 mixed ebook signal while audiobook requested');
+      }
     } else {
       score -= 15;
       scoreBreakdown.push('-15 non-audiobook while audiobook requested');
     }
-  } else if (likelyAudiobook) {
-    score -= 80;
-    scoreBreakdown.push('-80 audiobook penalty');
+  } else {
+    if (hasEbookSignals) {
+      score += 45;
+      scoreBreakdown.push('+45 ebook signal');
+    } else {
+      score -= 20;
+      scoreBreakdown.push('-20 no ebook signal');
+    }
+
+    if (likelyAudiobook) {
+      score -= 80;
+      scoreBreakdown.push('-80 audiobook penalty');
+    }
   }
 
-  return { score, likelyAudiobook, scoreBreakdown };
+  return { score, likelyAudiobook, hasEbookSignals, scoreBreakdown };
 }
 
 async function lookupReadarrBooksByTerm(rawQuery, contextLabel = 'Readarr lookup') {
@@ -988,6 +1054,7 @@ function buildScoredReadarrEntries(books, normalizedSearchTitle, normalizedSearc
       book,
       score: details.score,
       likelyAudiobook: details.likelyAudiobook,
+      hasEbookSignals: details.hasEbookSignals,
       companionTitle: isCompanionBookTitle(book?.title),
       scoreBreakdown: details.scoreBreakdown
     };
@@ -3579,6 +3646,7 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
       score: entry.score,
       scoreBreakdown: entry.scoreBreakdown,
       likelyAudiobook: entry.likelyAudiobook,
+      hasEbookSignals: entry.hasEbookSignals,
       formatHints: {
         bookType: entry.book.bookType || null,
         mediaType: entry.book.mediaType || null,
@@ -3627,7 +3695,8 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
         addType: payload.bookToAdd.addOptions?.addType || null,
         addOptions: payload.bookToAdd.addOptions,
         strippedAudiobookHints: payload.shouldStripAudiobookHints,
-        likelyAudiobook: isLikelyAudiobookResult(selectedEntry.book)
+        likelyAudiobook: isLikelyAudiobookResult(selectedEntry.book),
+        hasEbookSignals: hasReadarrEbookSignals(selectedEntry.book)
       };
 
       if (shouldAttemptAdd) {

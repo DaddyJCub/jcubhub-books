@@ -1199,8 +1199,12 @@ request:BR-1234567890-abc123 | epub" style="width: 100%; min-height: 120px; resi
       const normalizedFormat = String(format || 'any').toLowerCase();
       const selected = result?.selectedCandidate || null;
       const likelyAudioSelected = !!selected?.likelyAudiobook;
+      const ebookSignalSelected = !!selected?.hasEbookSignals;
       const nonAudioCount = Array.isArray(result?.results)
         ? result.results.filter(item => !item?.likelyAudiobook).length
+        : 0;
+      const ebookSignalCount = Array.isArray(result?.results)
+        ? result.results.filter(item => item?.hasEbookSignals).length
         : 0;
 
       if (normalizedFormat === 'audiobook') {
@@ -1224,6 +1228,13 @@ request:BR-1234567890-abc123 | epub" style="width: 100%; min-height: 120px; resi
         };
       }
 
+      if (!ebookSignalSelected) {
+        return {
+          passed: false,
+          reason: 'Selected candidate does not expose ebook signals.'
+        };
+      }
+
       if (nonAudioCount === 0) {
         return {
           passed: false,
@@ -1231,9 +1242,16 @@ request:BR-1234567890-abc123 | epub" style="width: 100%; min-height: 120px; resi
         };
       }
 
+      if (ebookSignalCount === 0) {
+        return {
+          passed: false,
+          reason: 'No ebook-signaled candidates in top results.'
+        };
+      }
+
       return {
         passed: true,
-        reason: `Selected non-audiobook candidate; non-audio candidates in top results: ${nonAudioCount}.`
+        reason: `Selected ebook-signaled candidate; non-audio candidates: ${nonAudioCount}; ebook-signaled candidates: ${ebookSignalCount}.`
       };
     }
 
@@ -1324,7 +1342,7 @@ request:BR-1234567890-abc123 | epub" style="width: 100%; min-height: 120px; resi
 
         const selected = body?.selectedCandidate || null;
         const selectedSummary = selected
-          ? `${selected.title || 'n/a'} | ${selected.foreignBookId || 'no-id'} | likelyAudio=${selected.likelyAudiobook ? 'yes' : 'no'}`
+          ? `${selected.title || 'n/a'} | ${selected.foreignBookId || 'no-id'} | likelyAudio=${selected.likelyAudiobook ? 'yes' : 'no'} | ebookSignals=${selected.hasEbookSignals ? 'yes' : 'no'}`
           : 'none';
         const score = scoreReadarrBatchCase(body, c.format);
         const inputSummary = c.kind === 'request'
