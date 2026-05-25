@@ -860,7 +860,7 @@ function isAudioTaggedValue(value) {
 }
 
 function isTextTaggedValue(value) {
-  return /\b(ebook|e-book|epub|mobi|pdf|kindle|text)\b/i.test(String(value || ''));
+  return /\b(ebook|e-book|epub|mobi|pdf|kindle|text|hardcover|paperback|print|novel)\b/i.test(String(value || ''));
 }
 
 function hasReadarrEbookSignals(book) {
@@ -1084,7 +1084,11 @@ async function searchReadarr(bookTitle, author, isbn, options = {}) {
       queryCandidates.push(`${author} ${bookTitle}`);
       queryCandidates.push(`${bookTitle} ${author}`);
       queryCandidates.push(`${bookTitle} ${author} ebook`);
+      queryCandidates.push(`${bookTitle} ${author} epub`);
+      queryCandidates.push(`${bookTitle} ${author} paperback`);
+      queryCandidates.push(`${bookTitle} ${author} hardcover`);
       queryCandidates.push(`${bookTitle} ${author} novel`);
+      queryCandidates.push(`${bookTitle} ${author} print`);
       queryCandidates.push(`${bookTitle}`);
     }
 
@@ -1138,11 +1142,13 @@ async function searchReadarr(bookTitle, author, isbn, options = {}) {
     }
 
     if (excludeAudiobook) {
-      const nonAudiobook = candidates.filter(item => !item.likelyAudiobook && !item.companionTitle);
-      if (nonAudiobook.length === 0) {
+      const nonAudiobookWithEbookSignals = candidates.filter(
+        item => !item.likelyAudiobook && !item.companionTitle && item.hasEbookSignals
+      );
+      if (nonAudiobookWithEbookSignals.length === 0) {
         return null;
       }
-      candidates = nonAudiobook;
+      candidates = nonAudiobookWithEbookSignals;
     }
 
     if (preferredFormat !== 'audiobook') {
@@ -3761,7 +3767,8 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
         author: selectedEntry.book?.authorName || null,
         foreignBookId: selectedEntry.book?.foreignBookId || null,
         score: selectedEntry.score,
-        likelyAudiobook: selectedEntry.likelyAudiobook
+        likelyAudiobook: selectedEntry.likelyAudiobook,
+        hasEbookSignals: selectedEntry.hasEbookSignals
       } : null,
       selectionWarning,
       totalResults: books.length,
