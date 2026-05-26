@@ -963,23 +963,30 @@ function isCompanionBookTitle(title) {
 function scoreReadarrLookupResult(book, normalizedSearchTitle, normalizedSearchAuthor, preferredFormat = 'any') {
   const bookTitleLower = (book.title || '').toLowerCase();
   const bookAuthorLower = (book.authorName || '').toLowerCase();
-  const likelyAudiobook = isLikelyAudiobookResult(book);
+  const companionTitle = isCompanionBookTitle(bookTitleLower);
+  const rawLikelyAudiobook = isLikelyAudiobookResult(book);
+  let likelyAudiobook = rawLikelyAudiobook;
   const hasEbookSignals = hasReadarrEbookSignals(book);
   let score = 0;
   const scoreBreakdown = [];
+  let titleMatchStrength = 0;
+  let authorMatch = false;
 
   if (bookTitleLower === normalizedSearchTitle) {
     score += 100;
     scoreBreakdown.push('+100 exact title');
+    titleMatchStrength = 3;
   } else if (bookTitleLower.startsWith(normalizedSearchTitle)) {
     score += 50;
     scoreBreakdown.push('+50 title starts with');
+    titleMatchStrength = 2;
   } else if (bookTitleLower.includes(normalizedSearchTitle)) {
     score += 25;
     scoreBreakdown.push('+25 title contains');
+    titleMatchStrength = 1;
   }
 
-  if (isCompanionBookTitle(bookTitleLower)) {
+  if (companionTitle) {
     score -= 90;
     scoreBreakdown.push('-90 companion book');
   }
@@ -987,8 +994,17 @@ function scoreReadarrLookupResult(book, normalizedSearchTitle, normalizedSearchA
   if (normalizedSearchAuthor &&
       (bookAuthorLower.includes(normalizedSearchAuthor) ||
       normalizedSearchAuthor.includes(bookAuthorLower))) {
+    authorMatch = true;
     score += 20;
     scoreBreakdown.push('+20 author match');
+  }
+
+  const highConfidenceTextIntent = !companionTitle && authorMatch && titleMatchStrength >= 2;
+
+  if (preferredFormat !== 'audiobook' && rawLikelyAudiobook && highConfidenceTextIntent) {
+    likelyAudiobook = false;
+    scoreBreakdown.push('+25 non-audio override (strong title/author match)');
+    score += 25;
   }
 
   if (preferredFormat === 'audiobook') {
@@ -1015,10 +1031,21 @@ function scoreReadarrLookupResult(book, normalizedSearchTitle, normalizedSearchA
     if (likelyAudiobook) {
       score -= 80;
       scoreBreakdown.push('-80 audiobook penalty');
+    } else if (rawLikelyAudiobook && highConfidenceTextIntent) {
+      score -= 10;
+      scoreBreakdown.push('-10 audio-biased metadata caution');
     }
   }
 
-  return { score, likelyAudiobook, hasEbookSignals, scoreBreakdown };
+  return {
+    score,
+    likelyAudiobook,
+    rawLikelyAudiobook,
+    hasEbookSignals,
+    companionTitle,
+    highConfidenceTextIntent,
+    scoreBreakdown
+  };
 }
 
 async function lookupReadarrBooksByTerm(rawQuery, contextLabel = 'Readarr lookup') {
@@ -1054,8 +1081,10 @@ function buildScoredReadarrEntries(books, normalizedSearchTitle, normalizedSearc
       book,
       score: details.score,
       likelyAudiobook: details.likelyAudiobook,
+      rawLikelyAudiobook: details.rawLikelyAudiobook,
       hasEbookSignals: details.hasEbookSignals,
-      companionTitle: isCompanionBookTitle(book?.title),
+      companionTitle: details.companionTitle,
+      highConfidenceTextIntent: details.highConfidenceTextIntent,
       scoreBreakdown: details.scoreBreakdown
     };
   });
@@ -3652,7 +3681,9 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
       score: entry.score,
       scoreBreakdown: entry.scoreBreakdown,
       likelyAudiobook: entry.likelyAudiobook,
+      rawLikelyAudiobook: entry.rawLikelyAudiobook,
       hasEbookSignals: entry.hasEbookSignals,
+      highConfidenceTextIntent: entry.highConfidenceTextIntent,
       formatHints: {
         bookType: entry.book.bookType || null,
         mediaType: entry.book.mediaType || null,
@@ -3702,7 +3733,9 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
         addOptions: payload.bookToAdd.addOptions,
         strippedAudiobookHints: payload.shouldStripAudiobookHints,
         likelyAudiobook: isLikelyAudiobookResult(selectedEntry.book),
-        hasEbookSignals: hasReadarrEbookSignals(selectedEntry.book)
+        rawLikelyAudiobook: selectedEntry.rawLikelyAudiobook,
+        hasEbookSignals: selectedEntry.hasEbookSignals,
+        highConfidenceTextIntent: selectedEntry.highConfidenceTextIntent
       };
 
       if (shouldAttemptAdd) {
@@ -3768,7 +3801,9 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
         foreignBookId: selectedEntry.book?.foreignBookId || null,
         score: selectedEntry.score,
         likelyAudiobook: selectedEntry.likelyAudiobook,
-        hasEbookSignals: selectedEntry.hasEbookSignals
+        rawLikelyAudiobook: selectedEntry.rawLikelyAudiobook,
+        hasEbookSignals: selectedEntry.hasEbookSignals,
+        highConfidenceTextIntent: selectedEntry.highConfidenceTextIntent
       } : null,
       selectionWarning,
       totalResults: books.length,
