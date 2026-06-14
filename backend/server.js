@@ -775,8 +775,17 @@ function normalizeCwaBookLink(rawLink) {
     const opdsBook = pathname.match(/\/opds\/(?:book|books)\/([^\/?#]+)\/?$/i)?.[1];
     if (opdsBook) return `/book/${opdsBook}`;
 
+    // Acquisition/download links carry the book id: /opds/download/<id>/<fmt>/...
     const opdsDownload = pathname.match(/\/opds\/download\/([^\/?#]+)\//i)?.[1];
     if (opdsDownload) return `/book/${opdsDownload}`;
+
+    // Cover/thumbnail links also carry the id: /opds/cover/<id>
+    const opdsCover = pathname.match(/\/opds\/cover\/([^\/?#]+)\/?$/i)?.[1];
+    if (opdsCover) return `/book/${opdsCover}`;
+
+    // Calibre-Web direct download: /get/<fmt>/<id>/<library>
+    const getDownload = pathname.match(/\/get\/[^\/]+\/([^\/?#]+)(?:\/|$)/i)?.[1];
+    if (getDownload) return `/book/${getDownload}`;
 
     return null;
   };
@@ -834,12 +843,20 @@ function parseCwaOpdsEntries(xml) {
       }
     }
 
+    // Prefer any link that resolves to a concrete /book/<id> (direct book link, OPDS
+    // book link, or — crucially — the acquisition/cover link that carries the id). The
+    // old "first non-download link" rule grabbed the cover image link, which has no id,
+    // so the book id was lost and callers fell back to a search URL.
+    const mapsToBook = link => {
+      const norm = normalizeCwaBookLink(link.href);
+      return !!norm && /\/book\/[^\/?#]+$/i.test(norm);
+    };
     const preferred =
       links.find(link => /\/book\/[^\/?#]+/i.test(link.href)) ||
       links.find(link => /\/opds\/(?:book|books)\/[^\/?#]+/i.test(link.href)) ||
       links.find(link => link.rel.includes('alternate') && link.type.includes('html')) ||
+      links.find(mapsToBook) ||
       links.find(link => link.rel.includes('alternate')) ||
-      links.find(link => !link.href.includes('/opds/download/')) ||
       links[0] ||
       null;
 
@@ -1492,27 +1509,41 @@ function updateRequestCwaState(requestId, now, available, cwaBookLink = null) {
   `).run(available ? 1 : 0, cwaBookLink || null, now, requestId);
 }
 
+// A "direct" link points at a specific book page (/book/<id>) rather than a search page.
+function isDirectCwaBookLink(url) {
+  return !!url && /\/book\/[^\/?#]+/i.test(String(url));
+}
+
 async function resolveCwaLinkForRequest(request, cwaCheck = null) {
   if (cwaCheck?.bookLink) {
     return cwaCheck.bookLink;
   }
-  if (request?.cwa_book_link) {
-    const normalizedStoredLink = normalizeCwaBookLink(request.cwa_book_link) || request.cwa_book_link;
+
+  // If we already have a stored DIRECT book link, use it (cheap path).
+  const normalizedStoredLink = request?.cwa_book_link
+    ? (normalizeCwaBookLink(request.cwa_book_link) || request.cwa_book_link)
+    : null;
+  if (normalizedStoredLink && isDirectCwaBookLink(normalizedStoredLink)) {
     if (request.id && normalizedStoredLink !== request.cwa_book_link) {
       updateRequestCwaState(request.id, new Date().toISOString(), true, normalizedStoredLink);
     }
     return normalizedStoredLink;
   }
-  if (!integrations.cwa) {
-    return buildCwaSearchLink(request?.book_title || '', request?.author || '');
+
+  // Stored link is a search URL (or nothing). Try to upgrade to a direct book link by
+  // re-querying CWA — this fixes legacy completions that stored a search URL.
+  if (integrations.cwa) {
+    const resolved = await checkCwaAvailability(request.book_title, request.author, request.isbn || '');
+    if (resolved.available && isDirectCwaBookLink(resolved.bookLink)) {
+      if (request?.id) {
+        updateRequestCwaState(request.id, new Date().toISOString(), true, resolved.bookLink);
+      }
+      return resolved.bookLink;
+    }
   }
 
-  const resolved = await checkCwaAvailability(request.book_title, request.author, request.isbn || '');
-  if (resolved.available && resolved.bookLink) {
-    return resolved.bookLink;
-  }
-
-  return buildCwaSearchLink(request.book_title, request.author);
+  // Fall back to whatever non-direct link we had, else a fresh search link.
+  return normalizedStoredLink || buildCwaSearchLink(request?.book_title || '', request?.author || '');
 }
 
 function findTrackedRequestConflict(currentRequestId, identifiers = {}) {
