@@ -72,8 +72,13 @@ const automation = {
   autoApprove: process.env.AUTO_APPROVE === 'true'  // Auto-approve all requests
 };
 
+// Case-insensitive boolean env parsing (so EREADER_SEND_ENABLED=TRUE works, not just "true").
+function envBool(value) {
+  return String(value || '').trim().toLowerCase() === 'true';
+}
+
 const ereader = {
-  enabled: process.env.EREADER_SEND_ENABLED === 'true',
+  enabled: envBool(process.env.EREADER_SEND_ENABLED),
   allowedDomains: String(process.env.EREADER_ALLOWED_DOMAINS || '')
     .split(',')
     .map(v => v.trim().toLowerCase())
@@ -88,11 +93,11 @@ const requesterAuth = {
   sessionTtlHours: parseInt(process.env.REQUESTER_SESSION_TTL_HOURS, 10) || 24 * 14,
   cookieName: process.env.REQUESTER_SESSION_COOKIE || 'jcub_requester_session',
   cookieSecure: process.env.REQUESTER_COOKIE_SECURE
-    ? process.env.REQUESTER_COOKIE_SECURE === 'true'
+    ? envBool(process.env.REQUESTER_COOKIE_SECURE)
     : process.env.NODE_ENV === 'production',
   // Test-only: when true, auth-start responses echo the raw magic token so automated
   // tests can complete the verify step. MUST stay false/unset in production.
-  exposeToken: process.env.REQUESTER_AUTH_EXPOSE_TOKEN === 'true' && process.env.NODE_ENV !== 'production'
+  exposeToken: envBool(process.env.REQUESTER_AUTH_EXPOSE_TOKEN) && process.env.NODE_ENV !== 'production'
 };
 
 // External book-metadata provider settings (REQ-009/REQ-010, DEP-005).
@@ -2496,6 +2501,56 @@ function readRequesterSessionFromCookie(req) {
   return { id: row.id, email: row.email, expiresAt: row.expires_at, rawToken: raw };
 }
 
+// Mint a magic-link login URL for use in outbound emails (auto sign-in).
+// Returns null when no absolute base URL is available (PUBLIC_URL unset and no req).
+function buildRequesterLoginLink(email, ttlMinutes, baseUrl) {
+  const normalized = normalizeRequesterEmail(email);
+  const base = String(baseUrl || process.env.PUBLIC_URL || '').replace(/\/+$/, '');
+  if (!normalized || !base) return null;
+
+  const token = generateMagicToken();
+  const now = new Date();
+  const ttl = ttlMinutes || requesterAuth.magicLinkTtlMin;
+  const expiresAt = new Date(now.getTime() + ttl * 60 * 1000);
+  db.prepare(`
+    INSERT INTO requester_magic_links (email, token_hash, expires_at, created_at, ip_hash)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(normalized, hashToken(token), expiresAt.toISOString(), now.toISOString(), null);
+
+  return `${base}/requester/auth/callback?token=${encodeURIComponent(token)}`;
+}
+
+// Email CTA that logs the recipient straight into their dashboard. Notification emails are
+// async, so these links use a longer TTL (default 7 days) than interactive sign-in links;
+// they remain one-time-use. Returns '' when no base URL is configured (link omitted safely).
+function dashboardEmailCta(email) {
+  const ttl = parseInt(process.env.REQUESTER_EMAIL_LINK_TTL_MIN, 10) || (7 * 24 * 60);
+  const url = buildRequesterLoginLink(email, ttl);
+  if (!url) return '';
+  return `
+    <div style="text-align:center; margin: 18px 0 0 0;">
+      <a href="${url}" style="display:inline-block; color:#667eea; text-decoration:none; font-size:14px; font-weight:600;">View all my requests in my dashboard →</a>
+    </div>`;
+}
+
+// Send a "book ready"-style email to the requester and each subscriber, appending a
+// PER-RECIPIENT auto-login dashboard link (never share one recipient's token with another).
+async function sendReadyEmails(request, innerContent, subject, title) {
+  const requesterNorm = normalizeRequesterEmail(request.requester_email);
+  if (request.notify_on_complete) {
+    const body = wrapEmailHtml(innerContent + dashboardEmailCta(request.requester_email), title);
+    await sendEmail(request.requester_email, subject, body);
+  }
+  const subscribers = getRequestSubscribers(request.id);
+  for (const sub of subscribers) {
+    if (!sub.notify_on_complete) continue;
+    const norm = normalizeRequesterEmail(sub.subscriber_email);
+    if (!norm || norm === requesterNorm) continue;
+    const body = wrapEmailHtml(innerContent + dashboardEmailCta(sub.subscriber_email), title);
+    await sendEmail(sub.subscriber_email, subject, body);
+  }
+}
+
 // Deterministic cleanup of expired/used auth artifacts (TASK-004).
 function cleanupRequesterAuthArtifacts() {
   const now = new Date().toISOString();
@@ -2824,7 +2879,7 @@ app.post('/api/book-request',
         <p style="margin: 20px 0 0 0; font-size: 16px; color: #1d1d1f;">We'll notify you when your request is processed.</p>
         <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b;">Best regards,<br><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
       `;
-      await sendEmail(requesterEmail, 'Book Request Received - JcubHub Books', wrapEmailHtml(emailContent, 'Book Request Received'));
+      await sendEmail(requesterEmail, 'Book Request Received - JcubHub Books', wrapEmailHtml(emailContent + dashboardEmailCta(requesterEmail), 'Book Request Received'));
     }
 
     // Send admin notification
@@ -3176,6 +3231,12 @@ function buildRequesterDashboardItem(request) {
     LIMIT 1
   `).get(request.id);
 
+  // Legacy/manually-entered requests have no stored cover. Derive one from any ISBN via
+  // Open Library covers (the dashboard falls back to a placeholder via onerror if missing).
+  const anyIsbn = request.isbn13 || request.isbn10 || request.isbn;
+  const coverUrl = request.cover_url
+    || (anyIsbn ? `https://covers.openlibrary.org/b/isbn/${encodeURIComponent(String(anyIsbn).replace(/[^0-9Xx]/g, ''))}-M.jpg?default=false` : null);
+
   return {
     id: request.id,
     bookTitle: request.book_title,
@@ -3192,7 +3253,7 @@ function buildRequesterDashboardItem(request) {
     metadata: {
       source: request.metadata_source || null,
       sourceId: request.metadata_source_id || null,
-      coverUrl: request.cover_url || null,
+      coverUrl,
       summary: request.summary || null,
       publisher: request.publisher || null,
       publishedYear: request.published_year || null,
@@ -3201,7 +3262,7 @@ function buildRequesterDashboardItem(request) {
       isbn: request.isbn || null
     },
     flags: {
-      hasCover: !!request.cover_url,
+      hasCover: !!coverUrl,
       hasSummary: !!request.summary,
       missingIsbn: !(request.isbn13 || request.isbn10 || request.isbn)
     }
@@ -3353,6 +3414,27 @@ app.get('/api/requester/requests/:id/history',
     `).all(request.id);
 
     res.json({ id: request.id, status: request.status, history });
+  }
+);
+
+// Resolve the freshest direct CWA book link and redirect (opens the book itself, not a
+// search page, whenever CWA returns a confident match). Owned requests only.
+app.get('/api/requester/requests/:id/open',
+  authenticateRequesterSession,
+  [param('id').trim().notEmpty()],
+  async (req, res) => {
+    const request = findRequesterOwnedRequest(req.params.id, req.requester.email);
+    if (!request) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+
+    const link = await resolveCwaLinkForRequest(request);
+    if (!link) {
+      return res.status(409).json({ error: 'No download link available yet' });
+    }
+    // Persist the (possibly upgraded to direct) link for future fast loads.
+    updateRequestCwaState(request.id, new Date().toISOString(), true, link);
+    return res.redirect(link);
   }
 );
 
@@ -3816,13 +3898,10 @@ app.patch('/api/admin/requests/:id',
         }
         
         if (emailContent && emailSubject) {
-          const wrappedEmail = wrapEmailHtml(emailContent, emailTitle);
           try {
-            if (request.notify_on_complete) {
-              await sendEmail(request.requester_email, emailSubject, wrappedEmail);
-              logger.info('Status notification email sent', { requestId: req.params.id, status: notificationStatus, email: request.requester_email });
-            }
-            await notifySubscribers(request, emailSubject, wrappedEmail, { excludeEmails: [request.requester_email] });
+            // Per-recipient auto-login dashboard CTA appended inside sendReadyEmails.
+            await sendReadyEmails(request, emailContent, emailSubject, emailTitle);
+            logger.info('Status notification emails sent', { requestId: req.params.id, status: notificationStatus });
           } catch (emailError) {
             logger.error('Failed to send status notification email', { error: emailError.message, requestId: req.params.id });
           }
@@ -3993,11 +4072,7 @@ app.post('/api/admin/batch/complete-all', authenticateToken, async (req, res) =>
           <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
         </div>
       `;
-      const wrappedEmail = wrapEmailHtml(emailContent, 'Your Book is Ready');
-      if (request.notify_on_complete) {
-        await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrappedEmail);
-      }
-      await notifySubscribers(request, 'Your Book is Ready! - JcubHub Books', wrappedEmail, { excludeEmails: [request.requester_email] });
+      await sendReadyEmails(request, emailContent, 'Your Book is Ready! - JcubHub Books', 'Your Book is Ready');
     }
 
     await notifyAdminLifecycle('completed', { ...request, cwa_book_link: cwaLink }, { cwaLink });
@@ -4879,11 +4954,7 @@ app.post('/api/webhook/book-complete',
             </div>
             <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b; text-align: center;">Happy reading!<br><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
           `;
-          const wrappedWebhookEmail = wrapEmailHtml(webhookEmailContent, 'Your Book is Ready');
-          if (request.notify_on_complete) {
-            await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrappedWebhookEmail);
-          }
-          await notifySubscribers(request, 'Your Book is Ready! - JcubHub Books', wrappedWebhookEmail, { excludeEmails: [request.requester_email] });
+          await sendReadyEmails(request, webhookEmailContent, 'Your Book is Ready! - JcubHub Books', 'Your Book is Ready');
         }
 
         await notifyAdminLifecycle('completed', { ...request, cwa_book_link: cwaLink }, { cwaLink });
@@ -4941,11 +5012,7 @@ app.post('/api/admin/sync-cwa', authenticateToken, async (req, res) => {
           </div>
           <p style="margin: 30px 0 0 0; font-size: 14px; color: #86868b; text-align: center;">Happy reading!<br><strong style="color: #1d1d1f;">JcubHub Books</strong></p>
         `;
-        const wrappedSyncEmail = wrapEmailHtml(syncEmailContent, 'Your Book is Ready');
-        if (request.notify_on_complete) {
-          await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrappedSyncEmail);
-        }
-        await notifySubscribers(request, 'Your Book is Ready! - JcubHub Books', wrappedSyncEmail, { excludeEmails: [request.requester_email] });
+        await sendReadyEmails(request, syncEmailContent, 'Your Book is Ready! - JcubHub Books', 'Your Book is Ready');
       }
 
       await notifyAdminLifecycle('completed', { ...request, cwa_book_link: cwaLink }, { cwaLink });
@@ -5059,11 +5126,7 @@ app.listen(PORT, () => {
                   <a href="${cwaLink}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Download from Library →</a>
                 </div>
               `;
-              const wrappedScheduledEmail = wrapEmailHtml(emailContent, 'Your Book is Ready');
-              if (request.notify_on_complete) {
-                await sendEmail(request.requester_email, 'Your Book is Ready! - JcubHub Books', wrappedScheduledEmail);
-              }
-              await notifySubscribers(request, 'Your Book is Ready! - JcubHub Books', wrappedScheduledEmail, { excludeEmails: [request.requester_email] });
+              await sendReadyEmails(request, emailContent, 'Your Book is Ready! - JcubHub Books', 'Your Book is Ready');
             }
             await notifyAdminLifecycle('completed', { ...request, cwa_book_link: cwaLink }, { cwaLink });
             updatedCount++;

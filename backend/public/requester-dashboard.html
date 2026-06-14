@@ -184,8 +184,10 @@
            <button class="summary-toggle" data-summary-toggle>Show more</button>`
         : '';
 
-      const readLink = item.readyLink
-        ? `<a class="btn btn-sm btn-primary" href="${escapeHtml(item.readyLink)}" target="_blank" rel="noopener noreferrer">📚 Read / Download</a>`
+      // Use the server /open endpoint so it resolves a direct CWA book link on click
+      // (rather than linking straight to a stored search URL).
+      const readLink = (item.available || item.readyLink)
+        ? `<a class="btn btn-sm btn-primary" href="/api/requester/requests/${encodeURIComponent(item.id)}/open" target="_blank" rel="noopener noreferrer">📚 Read / Download</a>`
         : '';
 
       return `
