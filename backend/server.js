@@ -147,6 +147,58 @@ logger.info('Database Configuration:', {
 
 const db = new Database(dbPath);
 
+function getAppSetting(key) {
+  const row = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(key);
+  return row ? row.value : null;
+}
+
+function setAppSetting(key, value) {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO app_settings (key, value, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET
+      value = excluded.value,
+      updated_at = excluded.updated_at
+  `).run(key, String(value), now);
+}
+
+function loadAutomationSettingsFromDb() {
+  const storedAutoApprove = getAppSetting('automation.autoApprove');
+  const storedAutoAddToReadarr = getAppSetting('automation.autoAddToReadarr');
+
+  if (storedAutoApprove !== null) {
+    automation.autoApprove = envBool(storedAutoApprove);
+  }
+
+  if (storedAutoAddToReadarr !== null) {
+    automation.autoAddToReadarr = envBool(storedAutoAddToReadarr);
+  }
+
+  logger.info('Automation settings loaded from database', {
+    autoApprove: automation.autoApprove,
+    autoAddToReadarr: automation.autoAddToReadarr
+  });
+}
+
+function updateAutomationSettings(nextValues = {}) {
+  if (typeof nextValues.autoApprove === 'boolean') {
+    automation.autoApprove = nextValues.autoApprove;
+    setAppSetting('automation.autoApprove', nextValues.autoApprove);
+  }
+
+  if (typeof nextValues.autoAddToReadarr === 'boolean') {
+    automation.autoAddToReadarr = nextValues.autoAddToReadarr;
+    setAppSetting('automation.autoAddToReadarr', nextValues.autoAddToReadarr);
+  }
+
+  return {
+    autoApprove: automation.autoApprove,
+    autoAddToReadarr: automation.autoAddToReadarr,
+    autoSyncInterval: automation.autoSyncInterval
+  };
+}
+
 // Database initialization
 function initDatabase() {
   db.exec(`
@@ -201,6 +253,12 @@ function initDatabase() {
       username TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
   `);
 
@@ -378,6 +436,7 @@ function initDatabase() {
 // Initialize database with error handling
 try {
   initDatabase();
+  loadAutomationSettingsFromDb();
 } catch (error) {
   logger.error('Failed to initialize database', { error: error.message, stack: error.stack });
   process.exit(1);
@@ -3964,6 +4023,39 @@ app.get('/api/admin/stats', authenticateToken, (req, res) => {
 
   res.json(stats);
 });
+
+app.patch('/api/admin/automation',
+  authenticateToken,
+  [
+    body('autoApprove').optional().isBoolean(),
+    body('autoAddToReadarr').optional().isBoolean()
+  ],
+  (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const hasAutoApprove = Object.prototype.hasOwnProperty.call(req.body, 'autoApprove');
+    const hasAutoAdd = Object.prototype.hasOwnProperty.call(req.body, 'autoAddToReadarr');
+    if (!hasAutoApprove && !hasAutoAdd) {
+      return res.status(400).json({ error: 'No automation settings provided' });
+    }
+
+    const updated = updateAutomationSettings({
+      autoApprove: hasAutoApprove ? req.body.autoApprove === true : undefined,
+      autoAddToReadarr: hasAutoAdd ? req.body.autoAddToReadarr === true : undefined
+    });
+
+    logger.info('Admin updated automation settings', {
+      admin: req.user?.username,
+      autoApprove: updated.autoApprove,
+      autoAddToReadarr: updated.autoAddToReadarr
+    });
+
+    res.json({ success: true, automation: updated });
+  }
+);
 
 // ============================================
 // Batch Operations

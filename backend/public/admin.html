@@ -115,6 +115,67 @@
       margin-top: 5px;
     }
 
+    .automation-panel {
+      background: var(--bg-card);
+      backdrop-filter: blur(20px);
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius-xl);
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+
+    .automation-title {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 12px;
+      color: var(--text-primary);
+    }
+
+    .automation-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 0;
+      border-top: 1px solid var(--border-light);
+    }
+
+    .automation-row:first-of-type {
+      border-top: none;
+      padding-top: 0;
+    }
+
+    .automation-copy {
+      flex: 1;
+      min-width: 220px;
+    }
+
+    .automation-copy strong {
+      display: block;
+      font-size: 0.95rem;
+      color: var(--text-primary);
+      margin-bottom: 3px;
+    }
+
+    .automation-copy span {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+    }
+
+    .automation-toggle {
+      width: 20px;
+      height: 20px;
+      accent-color: #667eea;
+      cursor: pointer;
+    }
+
+    .automation-status {
+      margin-top: 10px;
+      font-size: 0.82rem;
+      color: var(--text-muted);
+    }
+
     /* Requests table */
     .requests-section {
       background: var(--bg-card);
@@ -509,6 +570,25 @@
       </div>
     </div>
 
+    <section class="automation-panel">
+      <h3 class="automation-title">Automation Settings</h3>
+      <div class="automation-row">
+        <div class="automation-copy">
+          <strong>Auto-approve New Requests</strong>
+          <span>New submissions skip pending and move directly to approved.</span>
+        </div>
+        <input type="checkbox" id="autoApproveToggle" class="automation-toggle" aria-label="Toggle auto approve">
+      </div>
+      <div class="automation-row">
+        <div class="automation-copy">
+          <strong>Auto-add to Readarr</strong>
+          <span>After submit, automatically search/add in Readarr when configured.</span>
+        </div>
+        <input type="checkbox" id="autoAddReadarrToggle" class="automation-toggle" aria-label="Toggle auto add to Readarr">
+      </div>
+      <div class="automation-status" id="automationStatus">Loading automation settings...</div>
+    </section>
+
     <!-- Readarr Queue Panel -->
     <section class="requests-section" id="readarrPanel" style="margin-bottom: 20px; display: none;">
       <div class="section-header">
@@ -647,6 +727,10 @@ request:BR-1234567890-abc123 | epub" style="width: 100%; min-height: 120px; resi
     let currentFilter = '';
     let searchQuery = '';
     let requests = [];
+    let automationState = {
+      autoApprove: false,
+      autoAddToReadarr: false
+    };
 
     // Initialize
     document.addEventListener('DOMContentLoaded', () => {
@@ -778,6 +862,55 @@ request:BR-1234567890-abc123 | epub" style="width: 100%; min-height: 120px; resi
       loadRequests();
     }
 
+    function renderAutomationSettings(settings) {
+      automationState = {
+        autoApprove: settings?.autoApprove === true,
+        autoAddToReadarr: settings?.autoAddToReadarr === true
+      };
+
+      const autoApproveToggle = document.getElementById('autoApproveToggle');
+      const autoAddReadarrToggle = document.getElementById('autoAddReadarrToggle');
+      const status = document.getElementById('automationStatus');
+
+      if (autoApproveToggle) autoApproveToggle.checked = automationState.autoApprove;
+      if (autoAddReadarrToggle) autoAddReadarrToggle.checked = automationState.autoAddToReadarr;
+      if (status) {
+        status.textContent = `Auto-approve: ${automationState.autoApprove ? 'On' : 'Off'} | Auto-add Readarr: ${automationState.autoAddToReadarr ? 'On' : 'Off'}`;
+      }
+    }
+
+    async function updateAutomationSettings(patch) {
+      const autoApproveToggle = document.getElementById('autoApproveToggle');
+      const autoAddReadarrToggle = document.getElementById('autoAddReadarrToggle');
+      const status = document.getElementById('automationStatus');
+
+      if (autoApproveToggle) autoApproveToggle.disabled = true;
+      if (autoAddReadarrToggle) autoAddReadarrToggle.disabled = true;
+      if (status) status.textContent = 'Saving automation settings...';
+
+      try {
+        const response = await apiCall('/api/admin/automation', {
+          method: 'PATCH',
+          body: JSON.stringify(patch)
+        });
+        const result = await response.json();
+
+        if (!response.ok || !result.success) {
+          throw new Error(result.error || 'Failed to update automation settings');
+        }
+
+        renderAutomationSettings(result.automation || {});
+        showToast('Automation settings updated', 'success');
+        loadStats();
+      } catch (error) {
+        renderAutomationSettings(automationState);
+        showToast(error.message || 'Failed to update automation settings', 'error');
+      } finally {
+        if (autoApproveToggle) autoApproveToggle.disabled = false;
+        if (autoAddReadarrToggle) autoAddReadarrToggle.disabled = false;
+      }
+    }
+
     // Load data
     async function loadStats() {
       try {
@@ -789,6 +922,7 @@ request:BR-1234567890-abc123 | epub" style="width: 100%; min-height: 120px; resi
         document.getElementById('statSearching').textContent = stats.searching || 0;
         document.getElementById('statCompleted').textContent = stats.completed;
         document.getElementById('statRejected').textContent = stats.rejected;
+        renderAutomationSettings(stats.automation || {});
 
         // Show automation status
         if (stats.automation?.autoAddToReadarr) {
@@ -2167,6 +2301,12 @@ request:BR-1234567890-abc123 | epub" style="width: 100%; min-height: 120px; resi
     document.getElementById('runReadarrEbookSuiteBtn')?.addEventListener('click', runReadarrEbookSuite);
     document.getElementById('runReadarrCustomBatchBtn')?.addEventListener('click', runReadarrCustomBatch);
     document.getElementById('copyReadarrBatchOutputBtn')?.addEventListener('click', copyReadarrBatchOutput);
+    document.getElementById('autoApproveToggle')?.addEventListener('change', (e) => {
+      updateAutomationSettings({ autoApprove: e.target.checked });
+    });
+    document.getElementById('autoAddReadarrToggle')?.addEventListener('change', (e) => {
+      updateAutomationSettings({ autoAddToReadarr: e.target.checked });
+    });
     
     // Enter key in test modal
     document.getElementById('testIsbn')?.addEventListener('keypress', (e) => {
