@@ -841,9 +841,14 @@ body::before {
   z-index: var(--z-dropdown);
 }
 
+.footer p {
+  margin-bottom: 4px;
+}
+
 .footer .admin-link {
   display: inline-block;
   margin-top: 8px;
+  margin-left: 6px;
   color: var(--text-dim);
   text-decoration: none;
   font-size: 0.75rem;
@@ -851,9 +856,27 @@ body::before {
   transition: all var(--transition-base);
 }
 
+.footer .admin-link-dashboard {
+  opacity: 1;
+  color: var(--text-primary);
+  background: var(--gradient-primary);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: var(--radius-full);
+  padding: 7px 14px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  box-shadow: var(--shadow-primary);
+}
+
 .footer .admin-link:hover {
   color: var(--primary);
   opacity: 1;
+}
+
+.footer .admin-link-dashboard:hover {
+  color: var(--text-primary);
+  transform: translateY(-1px);
+  filter: brightness(1.08);
 }
 
 /* ============================================
@@ -958,6 +981,14 @@ body::before {
   .footer {
     bottom: 10px;
     font-size: var(--font-size-xs);
+  }
+
+  .footer .admin-link {
+    margin-left: 4px;
+  }
+
+  .footer .admin-link-dashboard {
+    padding: 7px 12px;
   }
 
   .popup-content {
