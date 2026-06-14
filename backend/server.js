@@ -856,86 +856,89 @@ async function checkCwaAvailability(bookTitle, author, isbn = '') {
 }
 
 function isAudioTaggedValue(value) {
-  return /\b(audiobook|audio\s*book|audio)\b/i.test(String(value || ''));
+  return /\b(audiobook|audio\s*book|audio|audible|unabridged|abridged|cassette)\b/i.test(String(value || ''));
 }
 
 function isTextTaggedValue(value) {
   return /\b(ebook|e-book|epub|mobi|pdf|kindle|text|hardcover|paperback|print|novel)\b/i.test(String(value || ''));
 }
 
-function hasReadarrEbookSignals(book) {
-  const hasLocalEbookVariant = Array.isArray(book?.localEbookBooks) && book.localEbookBooks.length > 0;
-  if (hasLocalEbookVariant) return true;
-
-  const primaryFields = [
-    book?.bookType,
-    book?.type,
-    book?.mediaType,
-    book?.bookFormat,
-    book?.releaseType,
-    book?.title,
-    book?.moniker,
-    book?.publisher,
-    book?.overview,
-    book?.description
-  ].filter(Boolean).map(v => String(v));
-
-  const editionFields = Array.isArray(book?.editions)
-    ? book.editions.flatMap(edition => [
-        edition?.isEbook === true ? 'ebook' : null,
-        edition?.format,
-        edition?.bookFormat,
-        edition?.mediaType,
-        edition?.releaseType,
-        edition?.title,
-        edition?.moniker
-      ]).filter(Boolean).map(v => String(v))
-    : [];
-
-  return primaryFields.concat(editionFields).some(isTextTaggedValue);
+// Chaptarr/Readarr lookup results put the author on book.author.authorName; the legacy
+// top-level book.authorName field does not exist on lookup payloads.
+function getReadarrAuthorName(book) {
+  return String(book?.author?.authorName || book?.authorName || '').trim();
 }
 
+// IMPORTANT: book.mediaType (and author.lastSelectedMediaType) are NOT reliable format
+// signals in Chaptarr. Goodreads-backed lookups report mediaType "audiobook" for plain
+// text editions, so we must classify from edition-level evidence instead.
+//
+// Reliable EBOOK / text evidence:
+//   - localEbookBooks present (already have it as an ebook)
+//   - any edition (or the book) reports a positive pageCount  → it's a text edition
+//   - edition.isEbook === true
+//   - explicit text tokens in title/format
+function hasReadarrEbookSignals(book) {
+  if (Array.isArray(book?.localEbookBooks) && book.localEbookBooks.length > 0) return true;
+  if (Number(book?.pageCount) > 0) return true;
+
+  const editions = Array.isArray(book?.editions) ? book.editions : [];
+  for (const edition of editions) {
+    if (edition?.isEbook === true) return true;
+    if (Number(edition?.pageCount) > 0) return true;
+  }
+
+  const textFields = [book?.bookType, book?.bookFormat, book?.releaseType, book?.title]
+    .filter(Boolean).map(v => String(v));
+  const editionTextFields = editions.flatMap(edition => [
+    edition?.format,
+    edition?.bookFormat,
+    edition?.releaseType,
+    edition?.title,
+    edition?.moniker
+  ].filter(Boolean).map(v => String(v)));
+
+  return textFields.concat(editionTextFields).some(isTextTaggedValue);
+}
+
+// Reliable AUDIOBOOK evidence (positive only — never derived from mediaType):
+//   - localAudiobookBooks present
+//   - an edition with narrators, chapters, or audiobook cross-monitoring
+//   - explicit audio tokens in the title/format (e.g. "Unabridged", "Audio Cassette")
 function hasReadarrAudiobookSignals(book) {
-  const hasLocalAudiobookVariant = Array.isArray(book?.localAudiobookBooks) && book.localAudiobookBooks.length > 0;
-  if (hasLocalAudiobookVariant) return true;
+  if (Array.isArray(book?.localAudiobookBooks) && book.localAudiobookBooks.length > 0) return true;
 
-  const primaryFields = [
-    book?.bookType,
-    book?.type,
-    book?.mediaType,
-    book?.bookFormat,
-    book?.releaseType,
-    book?.title,
-    book?.moniker,
-    book?.overview,
-    book?.description
-  ].filter(Boolean).map(v => String(v));
+  const editions = Array.isArray(book?.editions) ? book.editions : [];
+  for (const edition of editions) {
+    if (Array.isArray(edition?.narratorNames) && edition.narratorNames.length > 0) return true;
+    if (edition?.hasChapters === true) return true;
+    if (Array.isArray(edition?.chapters) && edition.chapters.length > 0) return true;
+    if (edition?.monitoredByAnotherAudiobookBook === true) return true;
+  }
 
-  const editionFields = Array.isArray(book?.editions)
-    ? book.editions.flatMap(edition => [
-        edition?.format,
-        edition?.bookFormat,
-        edition?.mediaType,
-        edition?.releaseType,
-        edition?.title,
-        edition?.moniker
-      ]).filter(Boolean).map(v => String(v))
-    : [];
+  const titleFields = [book?.title].filter(Boolean).map(v => String(v));
+  const editionTitleFields = editions.flatMap(edition => [
+    edition?.title,
+    edition?.format,
+    edition?.bookFormat,
+    edition?.releaseType
+  ].filter(Boolean).map(v => String(v)));
 
-  return primaryFields.concat(editionFields).some(isAudioTaggedValue);
+  return titleFields.concat(editionTitleFields).some(isAudioTaggedValue);
 }
 
 function isLikelyAudiobookResult(book) {
   const hasEbookSignals = hasReadarrEbookSignals(book);
   const hasAudiobookSignals = hasReadarrAudiobookSignals(book);
 
-  // Chaptarr can return mixed records; if ebook signals exist, do not classify as audiobook-only.
-  if (hasEbookSignals) {
-    return false;
+  // Only treat as audiobook-only when there is positive audio evidence AND no text evidence.
+  if (hasAudiobookSignals && !hasEbookSignals) {
+    return true;
   }
 
-  if (hasAudiobookSignals) {
-    return true;
+  // Mixed/text records are fine for ebook requests; prefer the ebook edition downstream.
+  if (hasEbookSignals) {
+    return false;
   }
 
   return isAudioTaggedValue(String(book?.title || ''));
@@ -962,7 +965,7 @@ function isCompanionBookTitle(title) {
 
 function scoreReadarrLookupResult(book, normalizedSearchTitle, normalizedSearchAuthor, preferredFormat = 'any') {
   const bookTitleLower = (book.title || '').toLowerCase();
-  const bookAuthorLower = (book.authorName || '').toLowerCase();
+  const bookAuthorLower = getReadarrAuthorName(book).toLowerCase();
   const companionTitle = isCompanionBookTitle(bookTitleLower);
   const rawLikelyAudiobook = isLikelyAudiobookResult(book);
   let likelyAudiobook = rawLikelyAudiobook;
@@ -1109,16 +1112,14 @@ async function searchReadarr(bookTitle, author, isbn, options = {}) {
     const rawQuery = searchTermOverride || (!ignoreIsbn && isbn ? isbn : `${author} ${bookTitle}`);
     const queryCandidates = [rawQuery];
 
-    if (!searchTermOverride && preferredFormat !== 'audiobook') {
-      queryCandidates.push(`${author} ${bookTitle}`);
-      queryCandidates.push(`${bookTitle} ${author}`);
-      queryCandidates.push(`${bookTitle} ${author} ebook`);
-      queryCandidates.push(`${bookTitle} ${author} epub`);
-      queryCandidates.push(`${bookTitle} ${author} paperback`);
-      queryCandidates.push(`${bookTitle} ${author} hardcover`);
-      queryCandidates.push(`${bookTitle} ${author} novel`);
-      queryCandidates.push(`${bookTitle} ${author} print`);
+    if (!searchTermOverride) {
+      // Goodreads-backed lookup ignores format keywords (e.g. "<title> ebook" returns 0
+      // results), so we vary word order instead. The bare-title query is important: it is
+      // often the only query that surfaces the standalone edition rather than collections
+      // or summary/companion books.
       queryCandidates.push(`${bookTitle}`);
+      queryCandidates.push(`${bookTitle} ${author}`);
+      queryCandidates.push(`${author} ${bookTitle}`);
     }
 
     const querySet = Array.from(new Set(queryCandidates.map(q => String(q || '').trim()).filter(Boolean)));
@@ -1133,7 +1134,7 @@ async function searchReadarr(bookTitle, author, isbn, options = {}) {
       }
 
       for (const book of lookupResult.books) {
-        const key = String(book?.foreignBookId || book?.titleSlug || `${book?.title || ''}|${book?.authorName || ''}`);
+        const key = String(book?.foreignBookId || book?.titleSlug || `${book?.title || ''}|${getReadarrAuthorName(book)}`);
         if (!booksByKey.has(key)) {
           booksByKey.set(key, book);
         }
@@ -1144,7 +1145,7 @@ async function searchReadarr(bookTitle, author, isbn, options = {}) {
 
     const topResults = books.slice(0, 3).map(b => ({
       title: b.title,
-      author: b.authorName,
+      author: getReadarrAuthorName(b),
       foreignBookId: b.foreignBookId,
       likelyAudiobook: isLikelyAudiobookResult(b)
     }));
@@ -1171,13 +1172,22 @@ async function searchReadarr(bookTitle, author, isbn, options = {}) {
     }
 
     if (excludeAudiobook) {
-      const nonAudiobookWithEbookSignals = candidates.filter(
-        item => !item.likelyAudiobook && !item.companionTitle && item.hasEbookSignals
-      );
-      if (nonAudiobookWithEbookSignals.length === 0) {
+      // Exclude only candidates that are positively identified as audiobooks/companions.
+      // Do NOT require a positive ebook signal here: most Goodreads lookup records carry no
+      // explicit ebook tag, and demanding one was rejecting legitimate books (the
+      // "only audiobook/companion candidates" failures). Prefer records that do have ebook
+      // signals, but fall back to any non-audiobook candidate so auto-add still succeeds.
+      const notAudiobook = candidates.filter(item => !item.likelyAudiobook && !item.companionTitle);
+      const withEbookSignals = notAudiobook.filter(item => item.hasEbookSignals);
+
+      if (withEbookSignals.length > 0) {
+        candidates = withEbookSignals;
+      } else if (notAudiobook.length > 0) {
+        candidates = notAudiobook;
+      } else {
+        // Genuinely nothing but audiobooks/companions for this title.
         return null;
       }
-      candidates = nonAudiobookWithEbookSignals;
     }
 
     if (preferredFormat !== 'audiobook') {
@@ -1692,8 +1702,10 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
     if (isAudioTaggedValue(sanitizedSearchResult.bookFormat)) delete sanitizedSearchResult.bookFormat;
     if (isAudioTaggedValue(sanitizedSearchResult.releaseType)) delete sanitizedSearchResult.releaseType;
 
-    if (Array.isArray(sanitizedSearchResult.editions)) {
-      const nonAudioEditions = sanitizedSearchResult.editions.filter(edition => {
+    if (Array.isArray(sanitizedSearchResult.editions) && sanitizedSearchResult.editions.length > 0) {
+      const editions = sanitizedSearchResult.editions.map(edition => ({ ...edition }));
+
+      const isAudioEdition = edition => {
         const tags = [
           edition?.format,
           edition?.bookFormat,
@@ -1702,14 +1714,36 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
           edition?.title,
           edition?.moniker
         ];
-        return !tags.some(isAudioTaggedValue);
+        const hasNarrator = Array.isArray(edition?.narratorNames) && edition.narratorNames.length > 0;
+        const hasChapters = edition?.hasChapters === true || (Array.isArray(edition?.chapters) && edition.chapters.length > 0);
+        return tags.some(isAudioTaggedValue) || hasNarrator || hasChapters;
+      };
+
+      const textEditions = editions.filter(edition => !isAudioEdition(edition));
+
+      // Never drop every edition: Chaptarr needs at least one edition to satisfy ebook
+      // metadata-profile filtering, otherwise the add fails with
+      // "No ebook edition survived metadata profile filtering for this book".
+      const pool = textEditions.length > 0 ? textEditions : editions;
+
+      // Goodreads lookups routinely leave isEbook=false on plain text editions, which makes
+      // Chaptarr refuse the ebook add. Promote a single preferred edition to a monitored
+      // ebook (prefer an already-monitored edition, then the one with the most pages).
+      const preferred =
+        pool.find(edition => edition?.monitored) ||
+        pool.slice().sort((a, b) => (Number(b?.pageCount) || 0) - (Number(a?.pageCount) || 0))[0] ||
+        pool[0];
+
+      pool.forEach(edition => {
+        if (edition === preferred) {
+          edition.isEbook = true;
+          edition.monitored = true;
+        } else {
+          edition.monitored = false;
+        }
       });
 
-      if (nonAudioEditions.length > 0) {
-        sanitizedSearchResult.editions = nonAudioEditions;
-      } else {
-        delete sanitizedSearchResult.editions;
-      }
+      sanitizedSearchResult.editions = pool;
     }
   }
 
@@ -1745,10 +1779,14 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
       ebookRootFolderPath: rootFolderPath,
       audiobookMonitored: audiobookSelected,
       ebookMonitored: ebookSelected,
-      audiobookMonitorExisting: audiobookSelected ? 2 : 0,
-      audiobookMonitorFuture: audiobookSelected,
-      ebookMonitorExisting: ebookSelected ? 2 : 0,
-      ebookMonitorFuture: ebookSelected,
+      // Track only the specific requested book, not the author's whole back catalogue.
+      // (A value of 2 here = "monitor existing bibliography", which made every add import
+      // the author's entire catalogue. The requested book is still monitored via its own
+      // monitored:true flag below.)
+      audiobookMonitorExisting: 0,
+      audiobookMonitorFuture: false,
+      ebookMonitorExisting: 0,
+      ebookMonitorFuture: false,
       lastSelectedMediaType: payloadMediaType,
       monitored: true
     };
@@ -1776,10 +1814,14 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
       ebookRootFolderPath: rootFolderPath,
       audiobookMonitored: audiobookSelected,
       ebookMonitored: ebookSelected,
-      audiobookMonitorExisting: audiobookSelected ? 2 : 0,
-      audiobookMonitorFuture: audiobookSelected,
-      ebookMonitorExisting: ebookSelected ? 2 : 0,
-      ebookMonitorFuture: ebookSelected,
+      // Track only the specific requested book, not the author's whole back catalogue.
+      // (A value of 2 here = "monitor existing bibliography", which made every add import
+      // the author's entire catalogue. The requested book is still monitored via its own
+      // monitored:true flag below.)
+      audiobookMonitorExisting: 0,
+      audiobookMonitorFuture: false,
+      ebookMonitorExisting: 0,
+      ebookMonitorFuture: false,
       lastSelectedMediaType: payloadMediaType
     };
   }
@@ -1801,7 +1843,9 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
     addOptions: {
       addType: 'manual',
       searchForNewBook: true,
-      monitor: 'all',
+      // 'none' = when the author is created, do not bulk-monitor their existing catalogue.
+      // Only the book being added (monitored:true) is tracked.
+      monitor: 'none',
       addNewAuthor: authorId === 0 && !!authorForBook
     }
   };
@@ -3441,7 +3485,7 @@ app.post('/api/admin/readarr/snapshot', authenticateToken, async (req, res) => {
       },
       topResults: scoredEntries.slice(0, 5).map(entry => ({
         title: entry.book.title,
-        author: entry.book.authorName,
+        author: getReadarrAuthorName(entry.book),
         foreignBookId: entry.book.foreignBookId,
         mediaType: entry.book.mediaType || null,
         score: entry.score,
@@ -3674,7 +3718,7 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
 
     const scoredResults = scoredEntries.slice(0, 10).map((entry, idx) => ({
       title: entry.book.title,
-      author: entry.book.authorName,
+      author: getReadarrAuthorName(entry.book),
       foreignBookId: entry.book.foreignBookId,
       releaseDate: entry.book.releaseDate,
       overview: entry.book.overview?.substring(0, 150) + (entry.book.overview?.length > 150 ? '...' : ''),
@@ -3797,7 +3841,7 @@ app.post('/api/admin/readarr/test', authenticateToken, async (req, res) => {
       selectedCandidate: selectedEntry ? {
         index: selectedIndex,
         title: selectedEntry.book?.title || null,
-        author: selectedEntry.book?.authorName || null,
+        author: getReadarrAuthorName(selectedEntry.book) || null,
         foreignBookId: selectedEntry.book?.foreignBookId || null,
         score: selectedEntry.score,
         likelyAudiobook: selectedEntry.likelyAudiobook,
@@ -3908,7 +3952,7 @@ app.post('/api/admin/readarr/add', authenticateToken, async (req, res) => {
     forcedSearchResult = selectedCandidate.book;
     manualCandidateInfo = {
       title: selectedCandidate.book?.title || null,
-      author: selectedCandidate.book?.authorName || null,
+      author: getReadarrAuthorName(selectedCandidate.book) || null,
       foreignBookId: selectedCandidate.book?.foreignBookId || null,
       score: selectedCandidate.score,
       likelyAudiobook: selectedCandidate.likelyAudiobook
