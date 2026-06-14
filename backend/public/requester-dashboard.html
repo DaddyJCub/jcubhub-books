@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My Requests · JcubHub Books</title>
+  <link rel="stylesheet" href="/css/styles.css">
+  <link rel="stylesheet" href="/css/requester.css">
+</head>
+<body>
+  <div class="particles" id="particles"></div>
+
+  <div class="requester-shell">
+    <div class="requester-header">
+      <div>
+        <h1>My Book Requests</h1>
+        <div class="requester-email-pill" id="emailPill"></div>
+      </div>
+      <div class="requester-actions">
+        <a class="btn btn-sm" href="/">+ New Request</a>
+        <a class="btn btn-sm" id="exportBtn" href="/api/requester/dashboard/export.csv">Export CSV</a>
+        <button class="btn btn-sm" id="resendBtn" type="button" title="Send a fresh sign-in link to your email">Resend Login Link</button>
+        <button class="btn btn-sm" id="logoutBtn" type="button">Log Out</button>
+      </div>
+    </div>
+
+    <div id="globalNotice" class="notice notice-info hidden"></div>
+
+    <div class="count-grid" id="countGrid"></div>
+
+    <div class="toolbar">
+      <input type="search" id="searchBox" placeholder="Search title, author, ISBN…">
+      <select id="sortSelect">
+        <option value="updated_desc">Newest update</option>
+        <option value="created_desc">Newest request</option>
+        <option value="title_asc">Title A–Z</option>
+      </select>
+      <div class="filter-chips" id="statusChips"></div>
+      <div class="filter-chips" id="metaChips"></div>
+    </div>
+
+    <div class="request-list" id="requestList"></div>
+    <div class="empty-state hidden" id="emptyState">No requests match your filters yet.</div>
+  </div>
+
+  <script>
+    (function () {
+      const container = document.getElementById('particles');
+      for (let i = 0; i < 40; i++) {
+        const p = document.createElement('div');
+        p.className = 'particle';
+        p.style.left = Math.random() * 100 + '%';
+        p.style.animationDelay = Math.random() * 20 + 's';
+        p.style.animationDuration = (15 + Math.random() * 10) + 's';
+        container.appendChild(p);
+      }
+    })();
+
+    function escapeHtml(value) {
+      if (value === null || value === undefined) return '';
+      return String(value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    const STATUS_VALUES = ['pending', 'approved', 'searching', 'downloading', 'completed', 'rejected', 'unavailable'];
+    const META_FILTERS = [
+      { key: 'has-cover', label: 'Has cover' },
+      { key: 'has-summary', label: 'Has summary' },
+      { key: 'missing-isbn', label: 'Missing ISBN' }
+    ];
+
+    const state = {
+      items: [],
+      email: '',
+      search: '',
+      sort: 'updated_desc',
+      status: 'all',
+      meta: new Set()
+    };
+
+    const globalNotice = document.getElementById('globalNotice');
+    function notify(message, kind = 'info') {
+      globalNotice.className = 'notice notice-' + kind;
+      globalNotice.textContent = message;
+      globalNotice.classList.remove('hidden');
+    }
+
+    async function loadIdentity() {
+      const res = await fetch('/api/requester/me');
+      if (res.status === 401) {
+        window.location.href = '/requester/login';
+        return false;
+      }
+      const data = await res.json();
+      state.email = data.email;
+      document.getElementById('emailPill').textContent = 'Signed in as ' + data.email;
+      return true;
+    }
+
+    async function loadDashboard() {
+      const res = await fetch('/api/requester/dashboard');
+      if (res.status === 401) { window.location.href = '/requester/login'; return; }
+      const data = await res.json();
+      state.items = data.items || [];
+      renderCounts(data.counts || {});
+      render();
+    }
+
+    function renderCounts(counts) {
+      const grid = document.getElementById('countGrid');
+      grid.innerHTML = STATUS_VALUES.map(s => `
+        <div class="count-chip">
+          <div class="num">${counts[s] || 0}</div>
+          <div class="label">${s}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderFilters() {
+      const statusChips = document.getElementById('statusChips');
+      const all = [{ key: 'all', label: 'All' }].concat(STATUS_VALUES.map(s => ({ key: s, label: s })));
+      statusChips.innerHTML = all.map(s =>
+        `<button class="filter-chip ${state.status === s.key ? 'active' : ''}" data-status="${s.key}" style="text-transform:capitalize;">${s.label}</button>`
+      ).join('');
+      statusChips.querySelectorAll('[data-status]').forEach(btn => {
+        btn.addEventListener('click', () => { state.status = btn.dataset.status; renderFilters(); render(); });
+      });
+
+      const metaChips = document.getElementById('metaChips');
+      metaChips.innerHTML = META_FILTERS.map(m =>
+        `<button class="filter-chip ${state.meta.has(m.key) ? 'active' : ''}" data-meta="${m.key}">${m.label}</button>`
+      ).join('');
+      metaChips.querySelectorAll('[data-meta]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const k = btn.dataset.meta;
+          if (state.meta.has(k)) state.meta.delete(k); else state.meta.add(k);
+          renderFilters(); render();
+        });
+      });
+    }
+
+    function matchesFilters(item) {
+      if (state.status !== 'all' && item.status !== state.status) return false;
+      if (state.meta.has('has-cover') && !item.flags.hasCover) return false;
+      if (state.meta.has('has-summary') && !item.flags.hasSummary) return false;
+      if (state.meta.has('missing-isbn') && !item.flags.missingIsbn) return false;
+      if (state.search) {
+        const q = state.search.toLowerCase();
+        const hay = [item.bookTitle, item.author, item.metadata.isbn13, item.metadata.isbn10, item.metadata.isbn]
+          .filter(Boolean).join(' ').toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    }
+
+    function sortItems(items) {
+      const arr = items.slice();
+      if (state.sort === 'updated_desc') arr.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+      else if (state.sort === 'created_desc') arr.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      else if (state.sort === 'title_asc') arr.sort((a, b) => (a.bookTitle || '').localeCompare(b.bookTitle || ''));
+      return arr;
+    }
+
+    function metaChipsHtml(item) {
+      const chips = [];
+      const m = item.metadata;
+      if (m.publishedYear) chips.push(escapeHtml(m.publishedYear));
+      if (m.publisher) chips.push(escapeHtml(m.publisher));
+      if (m.isbn13) chips.push('ISBN ' + escapeHtml(m.isbn13));
+      else if (m.isbn10) chips.push('ISBN ' + escapeHtml(m.isbn10));
+      else if (m.isbn) chips.push('ISBN ' + escapeHtml(m.isbn));
+      if (item.format) chips.push(escapeHtml(String(item.format).toUpperCase()));
+      return chips.map(c => `<span class="meta-chip">${c}</span>`).join('');
+    }
+
+    function cardHtml(item) {
+      const cover = item.metadata.coverUrl
+        ? `<img class="request-cover" src="${escapeHtml(item.metadata.coverUrl)}" alt="" loading="lazy" onerror="this.outerHTML='<div class=&quot;request-cover-placeholder&quot;>📖</div>'">`
+        : `<div class="request-cover-placeholder">📖</div>`;
+
+      const summary = item.metadata.summary
+        ? `<p class="summary-preview collapsed" data-summary>${escapeHtml(item.metadata.summary)}</p>
+           <button class="summary-toggle" data-summary-toggle>Show more</button>`
+        : '';
+
+      const readLink = item.readyLink
+        ? `<a class="btn btn-sm btn-primary" href="${escapeHtml(item.readyLink)}" target="_blank" rel="noopener noreferrer">📚 Read / Download</a>`
+        : '';
+
+      return `
+        <div class="request-card" data-id="${escapeHtml(item.id)}">
+          ${cover}
+          <div class="request-body">
+            <div class="request-title">${escapeHtml(item.bookTitle)}</div>
+            <div class="request-author">by ${escapeHtml(item.author)}</div>
+            <span class="status-badge status-${escapeHtml(item.status)}">${escapeHtml(item.status)}</span>
+            <div class="meta-chips">${metaChipsHtml(item)}</div>
+            ${summary}
+            ${item.latestNote ? `<p class="summary-preview" style="margin-top:6px;"><em>${escapeHtml(item.latestNote)}</em></p>` : ''}
+            <div class="card-actions">
+              ${readLink}
+              <button class="btn btn-sm" data-action="history">View history</button>
+              ${item.available ? `<button class="btn btn-sm" data-action="ereader">Send to eReader</button>` : ''}
+              ${item.status === 'searching' || item.status === 'downloading' ? `<button class="btn btn-sm" data-action="feedback">Match feedback</button>` : ''}
+            </div>
+            <div class="action-zone"></div>
+          </div>
+        </div>`;
+    }
+
+    function render() {
+      const list = document.getElementById('requestList');
+      const empty = document.getElementById('emptyState');
+      const filtered = sortItems(state.items.filter(matchesFilters));
+
+      if (filtered.length === 0) {
+        list.innerHTML = '';
+        empty.classList.remove('hidden');
+        return;
+      }
+      empty.classList.add('hidden');
+      list.innerHTML = filtered.map(cardHtml).join('');
+      wireCards();
+    }
+
+    function wireCards() {
+      document.querySelectorAll('[data-summary-toggle]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const summary = btn.previousElementSibling;
+          const collapsed = summary.classList.toggle('collapsed');
+          btn.textContent = collapsed ? 'Show more' : 'Show less';
+        });
+      });
+
+      document.querySelectorAll('.request-card').forEach(card => {
+        const id = card.dataset.id;
+        const zone = card.querySelector('.action-zone');
+
+        card.querySelector('[data-action="history"]')?.addEventListener('click', () => toggleHistory(id, zone));
+        card.querySelector('[data-action="ereader"]')?.addEventListener('click', () => showEreaderForm(id, zone));
+        card.querySelector('[data-action="feedback"]')?.addEventListener('click', () => showFeedbackForm(id, zone));
+      });
+    }
+
+    async function toggleHistory(id, zone) {
+      if (zone.dataset.open === 'history') { zone.innerHTML = ''; zone.dataset.open = ''; return; }
+      zone.dataset.open = 'history';
+      zone.innerHTML = '<div class="timeline">Loading…</div>';
+      try {
+        const res = await fetch(`/api/requester/requests/${encodeURIComponent(id)}/history`);
+        const data = await res.json();
+        const rows = (data.history || []).map(h => `
+          <div class="timeline-item">
+            <div class="timeline-status">${escapeHtml(h.status)}</div>
+            <div class="timeline-time">${new Date(h.changed_at).toLocaleString()}</div>
+            ${h.notes ? `<div class="timeline-note">${escapeHtml(h.notes)}</div>` : ''}
+          </div>`).join('');
+        zone.innerHTML = `<div class="timeline">${rows || 'No history yet.'}</div>`;
+      } catch (e) {
+        zone.innerHTML = '<div class="timeline">Failed to load history.</div>';
+      }
+    }
+
+    function showEreaderForm(id, zone) {
+      if (zone.dataset.open === 'ereader') { zone.innerHTML = ''; zone.dataset.open = ''; return; }
+      zone.dataset.open = 'ereader';
+      zone.innerHTML = `
+        <div class="inline-form">
+          <input type="email" placeholder="eReader email (e.g. name@kindle.com)" data-ereader-input>
+          <button class="btn btn-sm btn-primary" data-ereader-send>Send</button>
+        </div>
+        <div class="timeline-note" data-ereader-result></div>`;
+      const result = zone.querySelector('[data-ereader-result]');
+      zone.querySelector('[data-ereader-send]').addEventListener('click', async () => {
+        const ereaderEmail = zone.querySelector('[data-ereader-input]').value.trim();
+        if (!ereaderEmail) { result.textContent = 'Enter an eReader email.'; return; }
+        result.textContent = 'Sending…';
+        try {
+          const res = await fetch(`/api/requester/requests/${encodeURIComponent(id)}/send-ereader`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ereaderEmail })
+          });
+          const data = await res.json();
+          result.textContent = res.ok ? `Sent to ${data.sentTo}.` : (data.error || 'Failed to send.');
+        } catch (e) { result.textContent = 'Network error.'; }
+      });
+    }
+
+    function showFeedbackForm(id, zone) {
+      if (zone.dataset.open === 'feedback') { zone.innerHTML = ''; zone.dataset.open = ''; return; }
+      zone.dataset.open = 'feedback';
+      zone.innerHTML = `
+        <div class="inline-form">
+          <input type="text" placeholder="Optional note for admin" data-feedback-input>
+          <button class="btn btn-sm" data-feedback="match_confirmed">Looks correct</button>
+          <button class="btn btn-sm" data-feedback="match_mismatch">Wrong match</button>
+        </div>
+        <div class="timeline-note" data-feedback-result></div>`;
+      const result = zone.querySelector('[data-feedback-result]');
+      zone.querySelectorAll('[data-feedback]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          result.textContent = 'Sending…';
+          try {
+            const res = await fetch(`/api/requester/requests/${encodeURIComponent(id)}/feedback`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ feedbackType: btn.dataset.feedback, message: zone.querySelector('[data-feedback-input]').value.trim() })
+            });
+            const data = await res.json();
+            result.textContent = res.ok ? 'Thanks for the feedback.' : (data.error || 'Failed to send.');
+          } catch (e) { result.textContent = 'Network error.'; }
+        });
+      });
+    }
+
+    document.getElementById('searchBox').addEventListener('input', (e) => { state.search = e.target.value.trim(); render(); });
+    document.getElementById('sortSelect').addEventListener('change', (e) => { state.sort = e.target.value; render(); });
+
+    document.getElementById('logoutBtn').addEventListener('click', async () => {
+      await fetch('/api/requester/auth/logout', { method: 'POST' }).catch(() => {});
+      window.location.href = '/requester/login';
+    });
+
+    document.getElementById('resendBtn').addEventListener('click', async () => {
+      if (!state.email) return;
+      try {
+        await fetch('/api/requester/auth/start', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: state.email })
+        });
+        notify('A fresh sign-in link has been sent to ' + state.email + '.', 'success');
+      } catch (e) { notify('Could not send a new link right now.', 'error'); }
+    });
+
+    (async function init() {
+      renderFilters();
+      if (await loadIdentity()) {
+        await loadDashboard();
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign In · JcubHub Books</title>
+  <link rel="stylesheet" href="/css/styles.css">
+  <link rel="stylesheet" href="/css/requester.css">
+</head>
+<body>
+  <div class="particles" id="particles"></div>
+
+  <div class="requester-login-wrap">
+    <div class="requester-login-card">
+      <h1>Your Books Dashboard</h1>
+      <p class="sub">Enter your email and we'll send you a one-time sign-in link. No password needed.</p>
+
+      <div id="errorNotice" class="notice notice-error hidden"></div>
+      <div id="successNotice" class="notice notice-success hidden"></div>
+
+      <form id="loginForm">
+        <div class="field">
+          <label for="email">Email address</label>
+          <input type="email" id="email" name="email" placeholder="you@example.com" required autocomplete="email">
+        </div>
+        <button type="submit" class="btn btn-primary" id="submitBtn" style="width:100%; justify-content:center;">Send sign-in link</button>
+      </form>
+
+      <p class="sub" style="margin-top: var(--space-5); text-align:center;">
+        <a href="/" class="summary-toggle">← Back to home</a>
+      </p>
+    </div>
+  </div>
+
+  <script>
+    // Lightweight particle layer (mirrors index.html aesthetic).
+    (function () {
+      const container = document.getElementById('particles');
+      for (let i = 0; i < 40; i++) {
+        const p = document.createElement('div');
+        p.className = 'particle';
+        p.style.left = Math.random() * 100 + '%';
+        p.style.animationDelay = Math.random() * 20 + 's';
+        p.style.animationDuration = (15 + Math.random() * 10) + 's';
+        container.appendChild(p);
+      }
+    })();
+
+    const errorNotice = document.getElementById('errorNotice');
+    const successNotice = document.getElementById('successNotice');
+    const submitBtn = document.getElementById('submitBtn');
+
+    const ERROR_MESSAGES = {
+      invalid: 'That sign-in link is invalid. Please request a new one.',
+      used: 'That sign-in link was already used. Please request a new one.',
+      expired: 'That sign-in link has expired. Please request a new one.'
+    };
+
+    // Surface callback errors passed back via ?error=
+    const params = new URLSearchParams(window.location.search);
+    const errorParam = params.get('error');
+    if (errorParam) {
+      errorNotice.textContent = ERROR_MESSAGES[errorParam] || 'Unable to sign you in. Please request a new link.';
+      errorNotice.classList.remove('hidden');
+    }
+
+    document.getElementById('loginForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      errorNotice.classList.add('hidden');
+      successNotice.classList.add('hidden');
+
+      const email = document.getElementById('email').value.trim();
+      if (!email) return;
+
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Sending...';
+
+      try {
+        const res = await fetch('/api/requester/auth/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email })
+        });
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+          errorNotice.textContent = (data.errors && data.errors[0]?.msg) || data.error || 'Something went wrong. Please try again.';
+          errorNotice.classList.remove('hidden');
+        } else {
+          successNotice.textContent = data.message || 'Check your inbox for the sign-in link.';
+          successNotice.classList.remove('hidden');
+          // Surface dev token in non-production test mode only.
+          if (data.devToken) {
+            successNotice.textContent += ' (dev link below)';
+            const a = document.createElement('a');
+            a.href = '/requester/auth/callback?token=' + encodeURIComponent(data.devToken);
+            a.className = 'summary-toggle';
+            a.textContent = 'Open dev sign-in link';
+            a.style.display = 'block';
+            successNotice.appendChild(a);
+          }
+        }
+      } catch (e) {
+        errorNotice.textContent = 'Network error. Please try again.';
+        errorNotice.classList.remove('hidden');
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Send sign-in link';
+      }
+    });
+  </script>
+</body>
+</html>

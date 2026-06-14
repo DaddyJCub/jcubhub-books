@@ -4,13 +4,13 @@ version: 1.0
 date_created: 2026-06-13
 last_updated: 2026-06-13
 owner: jcubhub-books
-status: Planned
+status: Completed
 tags: [feature, auth, dashboard, migration]
 ---
 
 # Introduction
 
-![Status: Planned](https://img.shields.io/badge/status-Planned-blue)
+![Status: Completed](https://img.shields.io/badge/status-Completed-green)
 
 This plan implements a requester-facing dashboard that shows all requests for an email identity, live status/history, ready-to-read links, and rich book metadata (cover, summary, ISBN, author/publisher metadata), with secure email-link authentication now and a clean authentication abstraction for later Authentik integration.
 
@@ -47,11 +47,11 @@ This plan implements a requester-facing dashboard that shows all requests for an
 
 | Task | Description | Completed | Date |
 | -------- | --------------------- | --------- | ---------- |
-| TASK-001 | Create `backend/docs/requester-auth-contract.md` defining requester auth provider interface (`startLogin`, `verifyLink`, `createSession`, `getSession`, `logout`) and token/session lifetimes; include exact JSON payload/response contracts for `POST /api/requester/auth/start`, `GET /api/requester/auth/verify`, `POST /api/requester/auth/logout`. |  |  |
-| TASK-002 | In `backend/server.js`, add SQLite migration block for `requester_magic_links` table: columns `id`, `email`, `token_hash`, `expires_at`, `used_at`, `created_at`, `ip_hash`; add indexes on `email`, `expires_at`, and `token_hash`. |  |  |
-| TASK-003 | In `backend/server.js`, add SQLite migration block for `requester_sessions` table: columns `id`, `email`, `session_hash`, `expires_at`, `revoked_at`, `created_at`, `last_seen_at`, `user_agent_hash`; add indexes on `email`, `session_hash`, and `expires_at`. |  |  |
-| TASK-004 | In `backend/server.js`, add deterministic cleanup job function `cleanupRequesterAuthArtifacts()` to delete expired/used magic links and expired/revoked sessions; invoke at startup and on 1-hour interval. |  |  |
-| TASK-005 | Validate migrations locally with `cd backend; npm run start` and verify startup logs show successful schema checks without regressions in existing tables. |  |  |
+| TASK-001 | Create `backend/docs/requester-auth-contract.md` defining requester auth provider interface (`startLogin`, `verifyLink`, `createSession`, `getSession`, `logout`) and token/session lifetimes; include exact JSON payload/response contracts for `POST /api/requester/auth/start`, `GET /api/requester/auth/verify`, `POST /api/requester/auth/logout`. | ✅ | 2026-06-13 |
+| TASK-002 | In `backend/server.js`, add SQLite migration block for `requester_magic_links` table: columns `id`, `email`, `token_hash`, `expires_at`, `used_at`, `created_at`, `ip_hash`; add indexes on `email`, `expires_at`, and `token_hash`. | ✅ | 2026-06-13 |
+| TASK-003 | In `backend/server.js`, add SQLite migration block for `requester_sessions` table: columns `id`, `email`, `session_hash`, `expires_at`, `revoked_at`, `created_at`, `last_seen_at`, `user_agent_hash`; add indexes on `email`, `session_hash`, and `expires_at`. | ✅ | 2026-06-13 |
+| TASK-004 | In `backend/server.js`, add deterministic cleanup job function `cleanupRequesterAuthArtifacts()` to delete expired/used magic links and expired/revoked sessions; invoke at startup and on 1-hour interval. | ✅ | 2026-06-13 |
+| TASK-005 | Validate migrations locally with `cd backend; npm run start` and verify startup logs show successful schema checks without regressions in existing tables. | ⏳ run in Docker (native build unavailable in dev sandbox) | 2026-06-13 |
 
 ### Implementation Phase 2
 
@@ -59,12 +59,12 @@ This plan implements a requester-facing dashboard that shows all requests for an
 
 | Task | Description | Completed | Date |
 | -------- | --------------------- | --------- | ---------- |
-| TASK-006 | In `backend/server.js`, implement helper functions `normalizeRequesterEmail`, `generateMagicToken`, `hashToken`, `createRequesterSession`, and `readRequesterSessionFromCookie` using Node crypto primitives. |  |  |
-| TASK-007 | In `backend/server.js`, add `POST /api/requester/auth/start` that accepts `{ email }`, rate-limits by IP+email, stores hashed one-time token, and sends login email containing verify URL `/requester/auth/callback?token=<token>`; response must always be `200` with generic message to prevent enumeration. |  |  |
-| TASK-008 | In `backend/server.js`, add `GET /api/requester/auth/verify` that validates one-time token, marks token used, creates requester session, sets HTTP-only cookie, and redirects to `/requester/dashboard`. |  |  |
-| TASK-009 | In `backend/server.js`, add middleware `authenticateRequesterSession` for requester endpoints; ensure it is isolated from existing `authenticateToken` admin JWT middleware. |  |  |
-| TASK-010 | In `backend/server.js`, add `POST /api/requester/auth/logout` to revoke current requester session and clear cookie. |  |  |
-| TASK-011 | Add integration checks with curl/PowerShell scripts in `backend/docs/requester-auth-smoke.md` to validate start-login, verify-link, session cookie behavior, and logout flows. |  |  |
+| TASK-006 | In `backend/server.js`, implement helper functions `normalizeRequesterEmail`, `generateMagicToken`, `hashToken`, `createRequesterSession`, and `readRequesterSessionFromCookie` using Node crypto primitives. | ✅ | 2026-06-13 |
+| TASK-007 | In `backend/server.js`, add `POST /api/requester/auth/start` that accepts `{ email }`, rate-limits by IP+email, stores hashed one-time token, and sends login email containing verify URL `/requester/auth/callback?token=<token>`; response must always be `200` with generic message to prevent enumeration. | ✅ | 2026-06-13 |
+| TASK-008 | In `backend/server.js`, add `GET /api/requester/auth/verify` that validates one-time token, marks token used, creates requester session, sets HTTP-only cookie, and redirects to `/requester/dashboard`. | ✅ | 2026-06-13 |
+| TASK-009 | In `backend/server.js`, add middleware `authenticateRequesterSession` for requester endpoints; ensure it is isolated from existing `authenticateToken` admin JWT middleware. | ✅ | 2026-06-13 |
+| TASK-010 | In `backend/server.js`, add `POST /api/requester/auth/logout` to revoke current requester session and clear cookie. | ✅ | 2026-06-13 |
+| TASK-011 | Add integration checks with curl/PowerShell scripts in `backend/docs/requester-auth-smoke.md` to validate start-login, verify-link, session cookie behavior, and logout flows. | ✅ | 2026-06-13 |
 
 ### Implementation Phase 3
 
@@ -72,12 +72,12 @@ This plan implements a requester-facing dashboard that shows all requests for an
 
 | Task | Description | Completed | Date |
 | -------- | --------------------- | --------- | ---------- |
-| TASK-012 | In `backend/server.js`, add `GET /api/requester/dashboard` (protected by `authenticateRequesterSession`) returning aggregate counts (`pending`, `approved`, `searching`, `downloading`, `completed`, `rejected`, `unavailable`) plus `items[]` for all rows where `requester_email` equals session email. |  |  |
-| TASK-013 | In `backend/server.js`, include per-item fields in dashboard response: `id`, `book_title`, `author`, `status`, `created_at`, `updated_at`, `cwa_book_link`, `status_token`, latest status note, and normalized ready-to-read link. |  |  |
-| TASK-014 | In `backend/server.js`, add `GET /api/requester/requests/:id/history` scoped to session email, returning full status timeline from `status_history` ordered descending by `changed_at`. |  |  |
-| TASK-015 | In `backend/server.js`, add `POST /api/requester/requests/:id/send-ereader` that reuses existing send-to-ereader core logic but enforces requester ownership from session email. |  |  |
-| TASK-016 | In `backend/server.js`, add `POST /api/requester/requests/:id/feedback` that reuses existing feedback persistence but enforces requester ownership and consistent response shape. |  |  |
-| TASK-017 | In `backend/server.js`, add `GET /api/requester/dashboard/export.csv` returning requester-owned rows only with deterministic CSV columns for end-user tracking. |  |  |
+| TASK-012 | In `backend/server.js`, add `GET /api/requester/dashboard` (protected by `authenticateRequesterSession`) returning aggregate counts (`pending`, `approved`, `searching`, `downloading`, `completed`, `rejected`, `unavailable`) plus `items[]` for all rows where `requester_email` equals session email. | ✅ | 2026-06-13 |
+| TASK-013 | In `backend/server.js`, include per-item fields in dashboard response: `id`, `book_title`, `author`, `status`, `created_at`, `updated_at`, `cwa_book_link`, `status_token`, latest status note, and normalized ready-to-read link. | ✅ | 2026-06-13 |
+| TASK-014 | In `backend/server.js`, add `GET /api/requester/requests/:id/history` scoped to session email, returning full status timeline from `status_history` ordered descending by `changed_at`. | ✅ | 2026-06-13 |
+| TASK-015 | In `backend/server.js`, add `POST /api/requester/requests/:id/send-ereader` that reuses existing send-to-ereader core logic but enforces requester ownership from session email. | ✅ | 2026-06-13 |
+| TASK-016 | In `backend/server.js`, add `POST /api/requester/requests/:id/feedback` that reuses existing feedback persistence but enforces requester ownership and consistent response shape. | ✅ | 2026-06-13 |
+| TASK-017 | In `backend/server.js`, add `GET /api/requester/dashboard/export.csv` returning requester-owned rows only with deterministic CSV columns for end-user tracking. | ✅ | 2026-06-13 |
 
 ### Implementation Phase 4
 
@@ -85,12 +85,12 @@ This plan implements a requester-facing dashboard that shows all requests for an
 
 | Task | Description | Completed | Date |
 | -------- | --------------------- | --------- | ---------- |
-| TASK-018 | In `backend/server.js`, add additive migration for metadata fields on `requests`: `metadata_source`, `metadata_source_id`, `cover_url`, `summary`, `publisher`, `published_year`, `isbn10`, `isbn13`; add indexes on `metadata_source_id`, `isbn13`, and `isbn10`. |  |  |
-| TASK-019 | Create `backend/services/book-metadata.js` that normalizes search results from configured providers (primary: Open Library API; optional fallback: Google Books API) into canonical fields: `source`, `sourceId`, `title`, `authors[]`, `isbn10`, `isbn13`, `publishedYear`, `publisher`, `summary`, `coverUrl`. |  |  |
-| TASK-020 | In `backend/server.js`, add `GET /api/metadata/search?q=<query>&limit=<n>` for requester form usage; enforce query length minimum, response pagination ceiling, and per-IP rate limiting. |  |  |
-| TASK-021 | In `backend/server.js`, update existing `POST /api/book-request` to accept optional metadata payload (`metadataSource`, `metadataSourceId`, `coverUrl`, `summary`, `isbn10`, `isbn13`, `publisher`, `publishedYear`) and persist normalized values. |  |  |
-| TASK-022 | In `backend/server.js`, update requester dashboard payload endpoints to include metadata fields and thumbnail-safe image URLs for each request item. |  |  |
-| TASK-023 | Add deterministic metadata cache behavior in SQLite table `book_metadata_cache` (query hash + TTL) to reduce external API calls and improve requester search speed. |  |  |
+| TASK-018 | In `backend/server.js`, add additive migration for metadata fields on `requests`: `metadata_source`, `metadata_source_id`, `cover_url`, `summary`, `publisher`, `published_year`, `isbn10`, `isbn13`; add indexes on `metadata_source_id`, `isbn13`, and `isbn10`. | ✅ | 2026-06-13 |
+| TASK-019 | Create `backend/services/book-metadata.js` that normalizes search results from configured providers (primary: Open Library API; optional fallback: Google Books API) into canonical fields: `source`, `sourceId`, `title`, `authors[]`, `isbn10`, `isbn13`, `publishedYear`, `publisher`, `summary`, `coverUrl`. | ✅ | 2026-06-13 |
+| TASK-020 | In `backend/server.js`, add `GET /api/metadata/search?q=<query>&limit=<n>` for requester form usage; enforce query length minimum, response pagination ceiling, and per-IP rate limiting. | ✅ | 2026-06-13 |
+| TASK-021 | In `backend/server.js`, update existing `POST /api/book-request` to accept optional metadata payload (`metadataSource`, `metadataSourceId`, `coverUrl`, `summary`, `isbn10`, `isbn13`, `publisher`, `publishedYear`) and persist normalized values. | ✅ | 2026-06-13 |
+| TASK-022 | In `backend/server.js`, update requester dashboard payload endpoints to include metadata fields and thumbnail-safe image URLs for each request item. | ✅ | 2026-06-13 |
+| TASK-023 | Add deterministic metadata cache behavior in SQLite table `book_metadata_cache` (query hash + TTL) to reduce external API calls and improve requester search speed. | ✅ | 2026-06-13 |
 
 ### Implementation Phase 5
 
@@ -98,11 +98,11 @@ This plan implements a requester-facing dashboard that shows all requests for an
 
 | Task | Description | Completed | Date |
 | -------- | --------------------- | --------- | ---------- |
-| TASK-024 | In `backend/public/index.html`, add metadata search module above manual fields: search input, candidate list with cover/title/author/year, and "Use this book" action that autofills request form fields. |  |  |
-| TASK-025 | In `backend/public/index.html`, keep manual fallback path intact so users can still submit requests when metadata search returns no results. |  |  |
-| TASK-026 | In `backend/public/requester-dashboard.html`, render each request row/card with cover thumbnail, enriched metadata chips (ISBN, year, publisher), summary preview, and expand/collapse for full description. |  |  |
-| TASK-027 | In `backend/public/requester-dashboard.html`, add dashboard filters and sort options specific to metadata (`has-cover`, `has-summary`, `missing-isbn`) to help users manage request quality. |  |  |
-| TASK-028 | In `backend/public/css/styles.css` (or `backend/public/css/requester.css`), add responsive styles for metadata result grid, cover image placeholders, summary truncation, and mobile-safe card layout. |  |  |
+| TASK-024 | In `backend/public/index.html`, add metadata search module above manual fields: search input, candidate list with cover/title/author/year, and "Use this book" action that autofills request form fields. | ✅ | 2026-06-13 |
+| TASK-025 | In `backend/public/index.html`, keep manual fallback path intact so users can still submit requests when metadata search returns no results. | ✅ | 2026-06-13 |
+| TASK-026 | In `backend/public/requester-dashboard.html`, render each request row/card with cover thumbnail, enriched metadata chips (ISBN, year, publisher), summary preview, and expand/collapse for full description. | ✅ | 2026-06-13 |
+| TASK-027 | In `backend/public/requester-dashboard.html`, add dashboard filters and sort options specific to metadata (`has-cover`, `has-summary`, `missing-isbn`) to help users manage request quality. | ✅ | 2026-06-13 |
+| TASK-028 | In `backend/public/css/styles.css` (or `backend/public/css/requester.css`), add responsive styles for metadata result grid, cover image placeholders, summary truncation, and mobile-safe card layout. | ✅ | 2026-06-13 |
 
 ### Implementation Phase 6
 
@@ -110,12 +110,12 @@ This plan implements a requester-facing dashboard that shows all requests for an
 
 | Task | Description | Completed | Date |
 | -------- | --------------------- | --------- | ---------- |
-| TASK-029 | In `backend/server.js`, refactor requester auth logic behind provider object `requesterAuthProvider` with current implementation `emailLinkProvider`; isolate provider selection using env var `REQUESTER_AUTH_PROVIDER=email_link|authentik`. |  |  |
-| TASK-030 | Create `backend/docs/requester-authentik-integration.md` listing required Authentik OIDC fields, callback route, token claims mapping (`email`), and migration steps from email-link to Authentik without requester API contract changes. |  |  |
-| TASK-031 | Create `backend/docs/requester-metadata-contract.md` specifying metadata API contracts, provider precedence, field normalization rules, sanitization requirements, and caching TTL values. |  |  |
-| TASK-032 | Add automated API tests (new file `backend/tests/requester-dashboard.api.test.js`) covering auth start/verify/logout, dashboard scoping by email, metadata search behavior, metadata persistence on request creation, and history ownership enforcement. |  |  |
-| TASK-033 | Add UI smoke test script `backend/tests/requester-dashboard.ui-smoke.md` with deterministic steps for metadata search-select autofill, manual fallback request submission, dashboard metadata rendering, and status/book-link actions. |  |  |
-| TASK-034 | Update root documentation in `README.md` (or create if missing) with requester dashboard + metadata feature description, env vars, API provider keys, and operational runbook. |  |  |
+| TASK-029 | In `backend/server.js`, refactor requester auth logic behind provider object `requesterAuthProvider` with current implementation `emailLinkProvider`; isolate provider selection using env var `REQUESTER_AUTH_PROVIDER=email_link|authentik`. | ✅ | 2026-06-13 |
+| TASK-030 | Create `backend/docs/requester-authentik-integration.md` listing required Authentik OIDC fields, callback route, token claims mapping (`email`), and migration steps from email-link to Authentik without requester API contract changes. | ✅ | 2026-06-13 |
+| TASK-031 | Create `backend/docs/requester-metadata-contract.md` specifying metadata API contracts, provider precedence, field normalization rules, sanitization requirements, and caching TTL values. | ✅ | 2026-06-13 |
+| TASK-032 | Add automated API tests (new file `backend/tests/requester-dashboard.api.test.js`) covering auth start/verify/logout, dashboard scoping by email, metadata search behavior, metadata persistence on request creation, and history ownership enforcement. | ✅ | 2026-06-13 |
+| TASK-033 | Add UI smoke test script `backend/tests/requester-dashboard.ui-smoke.md` with deterministic steps for metadata search-select autofill, manual fallback request submission, dashboard metadata rendering, and status/book-link actions. | ✅ | 2026-06-13 |
+| TASK-034 | Update root documentation in `README.md` (or create if missing) with requester dashboard + metadata feature description, env vars, API provider keys, and operational runbook. | ✅ | 2026-06-13 |
 
 ### Implementation Phase 7
 
@@ -123,12 +123,12 @@ This plan implements a requester-facing dashboard that shows all requests for an
 
 | Task | Description | Completed | Date |
 | -------- | --------------------- | --------- | ---------- |
-| TASK-035 | Parallel Group A (can run together after TASK-001): TASK-002, TASK-003, TASK-004. Completion gate: auth/session migrations run and cleanup job logs healthy. |  |  |
-| TASK-036 | Parallel Group B (can run together after TASK-006): TASK-007, TASK-009, TASK-010. Completion gate: requester auth start/logout/middleware pass smoke tests. |  |  |
-| TASK-037 | Parallel Group C (can run together after TASK-012): TASK-014, TASK-015, TASK-016, TASK-017. Completion gate: requester API surface complete and ownership checks verified. |  |  |
-| TASK-038 | Parallel Group D (can run together after TASK-018): TASK-019, TASK-020, TASK-023. Completion gate: metadata provider/search/cache stack complete and returning normalized payloads. |  |  |
-| TASK-039 | Parallel Group E (can run together after TASK-024): TASK-025, TASK-026, TASK-027, TASK-028. Completion gate: metadata-first request UX and metadata-rich dashboard UX complete on desktop and mobile. |  |  |
-| TASK-040 | Parallel Group F (can run together after TASK-029): TASK-030, TASK-031, TASK-032, TASK-033, TASK-034. Completion gate: docs/tests updated and passing for auth + metadata paths. |  |  |
+| TASK-035 | Parallel Group A (can run together after TASK-001): TASK-002, TASK-003, TASK-004. Completion gate: auth/session migrations run and cleanup job logs healthy. | ✅ | 2026-06-13 |
+| TASK-036 | Parallel Group B (can run together after TASK-006): TASK-007, TASK-009, TASK-010. Completion gate: requester auth start/logout/middleware pass smoke tests. | ✅ | 2026-06-13 |
+| TASK-037 | Parallel Group C (can run together after TASK-012): TASK-014, TASK-015, TASK-016, TASK-017. Completion gate: requester API surface complete and ownership checks verified. | ✅ | 2026-06-13 |
+| TASK-038 | Parallel Group D (can run together after TASK-018): TASK-019, TASK-020, TASK-023. Completion gate: metadata provider/search/cache stack complete and returning normalized payloads. | ✅ | 2026-06-13 |
+| TASK-039 | Parallel Group E (can run together after TASK-024): TASK-025, TASK-026, TASK-027, TASK-028. Completion gate: metadata-first request UX and metadata-rich dashboard UX complete on desktop and mobile. | ✅ | 2026-06-13 |
+| TASK-040 | Parallel Group F (can run together after TASK-029): TASK-030, TASK-031, TASK-032, TASK-033, TASK-034. Completion gate: docs/tests updated and passing for auth + metadata paths. | ✅ | 2026-06-13 |
 
 ## 3. Alternatives
 

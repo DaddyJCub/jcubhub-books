@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>JcubHub Books</title>
   <link rel="stylesheet" href="css/styles.css">
+  <link rel="stylesheet" href="css/requester.css">
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
 <body>
@@ -77,6 +78,17 @@
         <div class="form-group">
           <label for="requesterEmail">Your Email</label>
           <input type="email" id="requesterEmail" name="requesterEmail" placeholder="Enter your email address" required>
+        </div>
+
+        <!-- Metadata-first search (autofills the manual fields below) -->
+        <div class="metadata-module">
+          <h3>🔎 Find your book</h3>
+          <p class="hint">Search by title, author, or ISBN and pick a match to autofill the details. Or just type them in manually below.</p>
+          <div class="metadata-search-row">
+            <input type="text" id="metadataQuery" placeholder="e.g. The Hobbit Tolkien" autocomplete="off">
+            <button type="button" class="btn btn-primary" id="metadataSearchBtn">Search</button>
+          </div>
+          <div class="metadata-results" id="metadataResults"></div>
         </div>
 
         <div class="form-group">
@@ -205,6 +217,80 @@
     let turnstileToken = null;
     let turnstileWidgetId = null;
     let lastStatusContext = null;
+    // Holds the metadata candidate the user selected (null = manual entry).
+    let selectedMetadata = null;
+
+    // ---- Metadata-first search + autofill ----
+    function renderMetadataResults(results) {
+      const container = document.getElementById('metadataResults');
+      if (!results || results.length === 0) {
+        container.innerHTML = '<div class="mr-meta" style="padding:8px;">No matches found. You can still fill in the details manually below.</div>';
+        return;
+      }
+      container.innerHTML = results.map((r, idx) => {
+        const cover = r.coverUrl
+          ? `<img src="${escapeHtml(r.coverUrl)}" alt="" loading="lazy" onerror="this.outerHTML='<div class=&quot;ph&quot;>📖</div>'">`
+          : '<div class="ph">📖</div>';
+        const authors = (r.authors || []).join(', ');
+        const bits = [authors, r.publishedYear, (r.isbn13 || r.isbn10)].filter(Boolean).join(' · ');
+        return `
+          <div class="metadata-result">
+            ${cover}
+            <div>
+              <div class="mr-title">${escapeHtml(r.title)}</div>
+              <div class="mr-meta">${escapeHtml(bits)}</div>
+            </div>
+            <button type="button" class="btn btn-sm btn-primary" data-meta-pick="${idx}">Use this book</button>
+          </div>`;
+      }).join('');
+
+      container.querySelectorAll('[data-meta-pick]').forEach(btn => {
+        btn.addEventListener('click', () => useMetadataCandidate(results[parseInt(btn.dataset.metaPick, 10)]));
+      });
+    }
+
+    // Autofill manual fields; leave anything missing editable (REQ-011).
+    function useMetadataCandidate(candidate) {
+      selectedMetadata = candidate;
+      const titleEl = document.getElementById('bookTitle');
+      const authorEl = document.getElementById('author');
+      const isbnEl = document.getElementById('isbn');
+      if (candidate.title) titleEl.value = candidate.title;
+      if (candidate.authors && candidate.authors.length) authorEl.value = candidate.authors.join(', ');
+      const isbn = candidate.isbn13 || candidate.isbn10;
+      if (isbn) isbnEl.value = isbn;
+      document.getElementById('metadataResults').innerHTML =
+        `<div class="mr-meta" style="padding:8px; color: var(--success);">✓ Using "${escapeHtml(candidate.title)}". Edit any field below if needed.</div>`;
+    }
+
+    async function runMetadataSearch() {
+      const q = document.getElementById('metadataQuery').value.trim();
+      const container = document.getElementById('metadataResults');
+      if (q.length < 2) {
+        container.innerHTML = '<div class="mr-meta" style="padding:8px;">Type at least 2 characters.</div>';
+        return;
+      }
+      container.innerHTML = '<div class="mr-meta" style="padding:8px;">Searching…</div>';
+      try {
+        const res = await fetch('/api/metadata/search?q=' + encodeURIComponent(q) + '&limit=8');
+        const data = await res.json();
+        if (!res.ok) {
+          container.innerHTML = `<div class="mr-meta" style="padding:8px;">${escapeHtml(data.error || 'Search unavailable.')}</div>`;
+          return;
+        }
+        renderMetadataResults(data.results);
+      } catch (e) {
+        container.innerHTML = '<div class="mr-meta" style="padding:8px;">Search failed. Fill in details manually below.</div>';
+      }
+    }
+
+    // Clear the selected metadata if the user edits the autofilled book fields by hand.
+    function attachMetadataInvalidation() {
+      ['bookTitle', 'author', 'isbn'].forEach(fieldId => {
+        const el = document.getElementById(fieldId);
+        if (el) el.addEventListener('input', () => { selectedMetadata = null; });
+      });
+    }
 
     function onTurnstileSuccess(token) {
       turnstileToken = token;
@@ -497,7 +583,19 @@
         notifyOnComplete: document.getElementById('notifyOnComplete').checked,
         turnstileToken: turnstileToken
       };
-      
+
+      // Attach metadata from the selected candidate (if still valid for the entered title).
+      if (selectedMetadata) {
+        formData.metadataSource = selectedMetadata.source || undefined;
+        formData.metadataSourceId = selectedMetadata.sourceId || undefined;
+        formData.coverUrl = selectedMetadata.coverUrl || undefined;
+        formData.summary = selectedMetadata.summary || undefined;
+        formData.publisher = selectedMetadata.publisher || undefined;
+        formData.publishedYear = selectedMetadata.publishedYear || undefined;
+        formData.isbn10 = selectedMetadata.isbn10 || undefined;
+        formData.isbn13 = selectedMetadata.isbn13 || undefined;
+      }
+
       try {
         const response = await fetch('/api/book-request', {
           method: 'POST',
@@ -677,6 +775,11 @@
     });
 
     // Event listeners for interactive elements (CSP-compliant)
+    document.getElementById('metadataSearchBtn').addEventListener('click', runMetadataSearch);
+    document.getElementById('metadataQuery').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); runMetadataSearch(); }
+    });
+    attachMetadataInvalidation();
     document.getElementById('requestCard').addEventListener('click', showRequestForm);
     document.getElementById('downloadCard').addEventListener('click', showLoginInfo);
     document.getElementById('backButton').addEventListener('click', hideRequestForm);

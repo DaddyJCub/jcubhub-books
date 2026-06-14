@@ -13,6 +13,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const Database = require('better-sqlite3');
 const crypto = require('crypto');
+const bookMetadata = require('./services/book-metadata');
 
 const app = express();
 const PORT = process.env.PORT || 3003;
@@ -79,9 +80,46 @@ const ereader = {
     .filter(Boolean)
 };
 
+// Requester (end-user) authentication settings. The provider abstraction lets us
+// swap email-link auth for Authentik (OIDC) later without changing requester API contracts.
+const requesterAuth = {
+  provider: String(process.env.REQUESTER_AUTH_PROVIDER || 'email_link').trim().toLowerCase(),
+  magicLinkTtlMin: parseInt(process.env.REQUESTER_MAGIC_LINK_TTL_MIN, 10) || 15,
+  sessionTtlHours: parseInt(process.env.REQUESTER_SESSION_TTL_HOURS, 10) || 24 * 14,
+  cookieName: process.env.REQUESTER_SESSION_COOKIE || 'jcub_requester_session',
+  cookieSecure: process.env.REQUESTER_COOKIE_SECURE
+    ? process.env.REQUESTER_COOKIE_SECURE === 'true'
+    : process.env.NODE_ENV === 'production',
+  // Test-only: when true, auth-start responses echo the raw magic token so automated
+  // tests can complete the verify step. MUST stay false/unset in production.
+  exposeToken: process.env.REQUESTER_AUTH_EXPOSE_TOKEN === 'true' && process.env.NODE_ENV !== 'production'
+};
+
+// External book-metadata provider settings (REQ-009/REQ-010, DEP-005).
+const metadata = {
+  primary: String(process.env.METADATA_PROVIDER || 'openlibrary').trim().toLowerCase(),
+  openLibraryUrl: String(process.env.OPENLIBRARY_URL || 'https://openlibrary.org').replace(/\/+$/, ''),
+  googleBooksKey: process.env.GOOGLE_BOOKS_API_KEY || '',
+  googleBooksUrl: String(process.env.GOOGLE_BOOKS_URL || 'https://www.googleapis.com/books/v1').replace(/\/+$/, ''),
+  cacheTtlMs: parseInt(process.env.METADATA_CACHE_TTL_MS, 10) || 24 * 60 * 60 * 1000,
+  searchTimeoutMs: parseInt(process.env.METADATA_HTTP_TIMEOUT_MS, 10) || 8000
+};
+
 logger.info('Integrations Status:', integrations);
 logger.info('Automation Settings:', automation);
 logger.info('eReader Settings:', { enabled: ereader.enabled, allowedDomains: ereader.allowedDomains });
+logger.info('Requester Auth Settings:', {
+  provider: requesterAuth.provider,
+  magicLinkTtlMin: requesterAuth.magicLinkTtlMin,
+  sessionTtlHours: requesterAuth.sessionTtlHours,
+  cookieSecure: requesterAuth.cookieSecure,
+  exposeToken: requesterAuth.exposeToken
+});
+logger.info('Metadata Settings:', {
+  primary: metadata.primary,
+  openLibraryUrl: metadata.openLibraryUrl,
+  googleBooks: !!metadata.googleBooksKey
+});
 
 // Initialize SQLite database
 // Use DATA_PATH env var if set (for Docker volume mounts), otherwise fallback to local data folder
@@ -223,6 +261,84 @@ function initDatabase() {
     db.exec('CREATE UNIQUE INDEX IF NOT EXISTS uq_requests_readarr_foreign_book_id ON requests(readarr_foreign_book_id) WHERE readarr_foreign_book_id IS NOT NULL');
   } catch (e) {
     logger.warn('Could not enforce unique index uq_requests_readarr_foreign_book_id', { error: e.message });
+  }
+
+  // ----------------------------------------------------------------------
+  // Requester dashboard: email-link auth + metadata schema (additive only).
+  // ----------------------------------------------------------------------
+
+  // Magic-link tokens (one-time-use, hashed at rest, short-lived).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS requester_magic_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL,
+      token_hash TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      created_at TEXT NOT NULL,
+      ip_hash TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS requester_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL,
+      session_hash TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      revoked_at TEXT,
+      created_at TEXT NOT NULL,
+      last_seen_at TEXT,
+      user_agent_hash TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS book_metadata_cache (
+      query_hash TEXT PRIMARY KEY,
+      query TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+  `);
+
+  // Additive metadata columns on requests (DAT-002: never drop/rename).
+  const metadataColumns = [
+    { name: 'metadata_source', sql: 'ALTER TABLE requests ADD COLUMN metadata_source TEXT' },
+    { name: 'metadata_source_id', sql: 'ALTER TABLE requests ADD COLUMN metadata_source_id TEXT' },
+    { name: 'cover_url', sql: 'ALTER TABLE requests ADD COLUMN cover_url TEXT' },
+    { name: 'summary', sql: 'ALTER TABLE requests ADD COLUMN summary TEXT' },
+    { name: 'publisher', sql: 'ALTER TABLE requests ADD COLUMN publisher TEXT' },
+    { name: 'published_year', sql: 'ALTER TABLE requests ADD COLUMN published_year INTEGER' },
+    { name: 'isbn10', sql: 'ALTER TABLE requests ADD COLUMN isbn10 TEXT' },
+    { name: 'isbn13', sql: 'ALTER TABLE requests ADD COLUMN isbn13 TEXT' }
+  ];
+
+  for (const column of metadataColumns) {
+    try {
+      db.exec(column.sql);
+      logger.info('Migration: Added metadata column to requests table', { column: column.name });
+    } catch (e) {
+      // Column already exists, ignore
+    }
+  }
+
+  const requesterIndexes = [
+    { name: 'idx_magic_links_email', sql: 'CREATE INDEX IF NOT EXISTS idx_magic_links_email ON requester_magic_links(email)' },
+    { name: 'idx_magic_links_expires', sql: 'CREATE INDEX IF NOT EXISTS idx_magic_links_expires ON requester_magic_links(expires_at)' },
+    { name: 'idx_magic_links_token_hash', sql: 'CREATE INDEX IF NOT EXISTS idx_magic_links_token_hash ON requester_magic_links(token_hash)' },
+    { name: 'idx_requester_sessions_email', sql: 'CREATE INDEX IF NOT EXISTS idx_requester_sessions_email ON requester_sessions(email)' },
+    { name: 'idx_requester_sessions_hash', sql: 'CREATE INDEX IF NOT EXISTS idx_requester_sessions_hash ON requester_sessions(session_hash)' },
+    { name: 'idx_requester_sessions_expires', sql: 'CREATE INDEX IF NOT EXISTS idx_requester_sessions_expires ON requester_sessions(expires_at)' },
+    { name: 'idx_requests_metadata_source_id', sql: 'CREATE INDEX IF NOT EXISTS idx_requests_metadata_source_id ON requests(metadata_source_id)' },
+    { name: 'idx_requests_isbn13', sql: 'CREATE INDEX IF NOT EXISTS idx_requests_isbn13 ON requests(isbn13)' },
+    { name: 'idx_requests_isbn10', sql: 'CREATE INDEX IF NOT EXISTS idx_requests_isbn10 ON requests(isbn10)' },
+    { name: 'idx_metadata_cache_expires', sql: 'CREATE INDEX IF NOT EXISTS idx_metadata_cache_expires ON book_metadata_cache(expires_at)' }
+  ];
+
+  for (const index of requesterIndexes) {
+    try {
+      db.exec(index.sql);
+    } catch (e) {
+      logger.warn('Could not create index', { index: index.name, error: e.message });
+    }
   }
 
   // Create default admin if not exists
@@ -2281,6 +2397,206 @@ function persistReadarrResult(requestId, readarrResult, now) {
 }
 
 // ============================================
+// Requester Auth Helpers (email-link)
+// ============================================
+
+function normalizeRequesterEmail(email) {
+  return String(email || '').trim().toLowerCase();
+}
+
+function generateMagicToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+// SHA-256 hash for at-rest storage of tokens/sessions. Tokens are high-entropy
+// random values, so a fast hash is appropriate (no need for bcrypt work factor).
+function hashToken(token) {
+  return crypto.createHash('sha256').update(String(token || '')).digest('hex');
+}
+
+function hashOpaque(value) {
+  if (!value) return null;
+  return crypto.createHash('sha256').update(String(value)).digest('hex');
+}
+
+function parseCookies(req) {
+  const header = req.headers?.cookie;
+  if (!header) return {};
+  return header.split(';').reduce((acc, part) => {
+    const idx = part.indexOf('=');
+    if (idx === -1) return acc;
+    const key = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
+    if (key) acc[key] = decodeURIComponent(value);
+    return acc;
+  }, {});
+}
+
+// Create a requester session row + return the raw session token (only returned once).
+function createRequesterSession(email, req) {
+  const now = new Date();
+  const sessionToken = crypto.randomBytes(32).toString('hex');
+  const expiresAt = new Date(now.getTime() + requesterAuth.sessionTtlHours * 60 * 60 * 1000);
+  db.prepare(`
+    INSERT INTO requester_sessions (email, session_hash, expires_at, created_at, last_seen_at, user_agent_hash)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    normalizeRequesterEmail(email),
+    hashToken(sessionToken),
+    expiresAt.toISOString(),
+    now.toISOString(),
+    now.toISOString(),
+    hashOpaque(req?.get?.('User-Agent') || '')
+  );
+  return { sessionToken, expiresAt };
+}
+
+function setRequesterSessionCookie(res, sessionToken, expiresAt) {
+  res.cookie(requesterAuth.cookieName, sessionToken, {
+    httpOnly: true,
+    secure: requesterAuth.cookieSecure,
+    sameSite: 'lax',
+    expires: expiresAt,
+    path: '/'
+  });
+}
+
+function clearRequesterSessionCookie(res) {
+  res.clearCookie(requesterAuth.cookieName, {
+    httpOnly: true,
+    secure: requesterAuth.cookieSecure,
+    sameSite: 'lax',
+    path: '/'
+  });
+}
+
+// Resolve the active (non-expired, non-revoked) session from the request cookie.
+function readRequesterSessionFromCookie(req) {
+  const cookies = parseCookies(req);
+  const raw = cookies[requesterAuth.cookieName];
+  if (!raw) return null;
+
+  const row = db.prepare(`
+    SELECT * FROM requester_sessions
+    WHERE session_hash = ?
+    LIMIT 1
+  `).get(hashToken(raw));
+
+  if (!row) return null;
+  if (row.revoked_at) return null;
+  if (new Date(row.expires_at).getTime() <= Date.now()) return null;
+
+  // Best-effort last-seen update (non-fatal).
+  try {
+    db.prepare('UPDATE requester_sessions SET last_seen_at = ? WHERE id = ?').run(new Date().toISOString(), row.id);
+  } catch (e) {
+    // ignore
+  }
+
+  return { id: row.id, email: row.email, expiresAt: row.expires_at, rawToken: raw };
+}
+
+// Deterministic cleanup of expired/used auth artifacts (TASK-004).
+function cleanupRequesterAuthArtifacts() {
+  const now = new Date().toISOString();
+  try {
+    const links = db.prepare(
+      'DELETE FROM requester_magic_links WHERE expires_at < ? OR used_at IS NOT NULL'
+    ).run(now);
+    const sessions = db.prepare(
+      'DELETE FROM requester_sessions WHERE expires_at < ? OR revoked_at IS NOT NULL'
+    ).run(now);
+    const caches = db.prepare(
+      'DELETE FROM book_metadata_cache WHERE expires_at < ?'
+    ).run(now);
+    logger.debug('Requester auth cleanup complete', {
+      magicLinksDeleted: links.changes,
+      sessionsDeleted: sessions.changes,
+      metadataCacheDeleted: caches.changes
+    });
+  } catch (error) {
+    logger.warn('Requester auth cleanup failed', { error: error.message });
+  }
+}
+
+// ----------------------------------------------------------------------
+// Requester auth provider abstraction (GUD-001).
+// `emailLinkProvider` is the current implementation. A future `authentikProvider`
+// can implement the same interface without changing requester API contracts.
+// ----------------------------------------------------------------------
+
+const emailLinkProvider = {
+  name: 'email_link',
+
+  // Always returns generic outcome; never reveals whether the email is known (SEC-004).
+  startLogin(email, req) {
+    const normalized = normalizeRequesterEmail(email);
+    const token = generateMagicToken();
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + requesterAuth.magicLinkTtlMin * 60 * 1000);
+
+    db.prepare(`
+      INSERT INTO requester_magic_links (email, token_hash, expires_at, created_at, ip_hash)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(
+      normalized,
+      hashToken(token),
+      expiresAt.toISOString(),
+      now.toISOString(),
+      hashOpaque(req?.ip || '')
+    );
+
+    return { token, expiresAt, email: normalized };
+  },
+
+  // Validate a one-time token, mark it used, and create a session.
+  verifyLink(token, req) {
+    const tokenHash = hashToken(token);
+    const row = db.prepare('SELECT * FROM requester_magic_links WHERE token_hash = ? LIMIT 1').get(tokenHash);
+
+    if (!row) return { ok: false, reason: 'invalid' };
+    if (row.used_at) return { ok: false, reason: 'used' };
+    if (new Date(row.expires_at).getTime() <= Date.now()) return { ok: false, reason: 'expired' };
+
+    db.prepare('UPDATE requester_magic_links SET used_at = ? WHERE id = ?').run(new Date().toISOString(), row.id);
+
+    const { sessionToken, expiresAt } = createRequesterSession(row.email, req);
+    return { ok: true, email: row.email, sessionToken, expiresAt };
+  },
+
+  getSession(req) {
+    return readRequesterSessionFromCookie(req);
+  },
+
+  logout(req) {
+    const session = readRequesterSessionFromCookie(req);
+    if (!session) return false;
+    db.prepare('UPDATE requester_sessions SET revoked_at = ? WHERE id = ?').run(new Date().toISOString(), session.id);
+    return true;
+  }
+};
+
+function selectRequesterAuthProvider() {
+  // Only email_link is implemented today; Authentik is documented for later wiring.
+  if (requesterAuth.provider === 'authentik') {
+    logger.warn('REQUESTER_AUTH_PROVIDER=authentik selected but not yet implemented; using email_link');
+  }
+  return emailLinkProvider;
+}
+
+const requesterAuthProvider = selectRequesterAuthProvider();
+
+// Middleware: authenticate requester session (isolated from admin JWT middleware).
+function authenticateRequesterSession(req, res, next) {
+  const session = requesterAuthProvider.getSession(req);
+  if (!session) {
+    return res.status(401).json({ error: 'Requester authentication required' });
+  }
+  req.requester = { email: session.email, sessionId: session.id };
+  next();
+}
+
+// ============================================
 // JWT Middleware
 // ============================================
 
@@ -2340,7 +2656,15 @@ app.post('/api/book-request',
     body('format').isIn(['epub', 'pdf', 'mobi', 'audiobook', 'any']).withMessage('Invalid format'),
     body('notes').optional().trim(),
     body('notifyOnComplete').optional().isBoolean(),
-    body('turnstileToken').notEmpty().withMessage('Captcha verification required')
+    body('turnstileToken').notEmpty().withMessage('Captcha verification required'),
+    body('metadataSource').optional({ values: 'falsy' }).trim().isLength({ max: 40 }),
+    body('metadataSourceId').optional({ values: 'falsy' }).trim().isLength({ max: 200 }),
+    body('coverUrl').optional({ values: 'falsy' }).trim().isLength({ max: 1000 }),
+    body('summary').optional({ values: 'falsy' }).trim().isLength({ max: 6000 }),
+    body('publisher').optional({ values: 'falsy' }).trim().isLength({ max: 300 }),
+    body('publishedYear').optional({ values: 'falsy' }).toInt().isInt({ min: 0, max: 3000 }),
+    body('isbn10').optional({ values: 'falsy' }).trim().isLength({ max: 13 }),
+    body('isbn13').optional({ values: 'falsy' }).trim().isLength({ max: 17 })
   ],
   async (req, res) => {
     const errors = validationResult(req);
@@ -2349,6 +2673,24 @@ app.post('/api/book-request',
     }
 
     const { requesterName, requesterEmail, bookTitle, author, isbn, format, notes, notifyOnComplete, turnstileToken } = req.body;
+
+    // Normalize + sanitize optional metadata (SEC-005). External text is never trusted raw.
+    const meta = {
+      source: req.body.metadataSource ? bookMetadata.sanitizeText(req.body.metadataSource, 40) : null,
+      sourceId: req.body.metadataSourceId ? bookMetadata.sanitizeText(req.body.metadataSourceId, 200) : null,
+      coverUrl: req.body.coverUrl ? bookMetadata.safeUrl(req.body.coverUrl) : null,
+      summary: req.body.summary ? bookMetadata.sanitizeText(req.body.summary, 6000) : null,
+      publisher: req.body.publisher ? bookMetadata.sanitizeText(req.body.publisher, 300) : null,
+      publishedYear: bookMetadata.pickYear(req.body.publishedYear),
+      isbn10: (() => {
+        const v = bookMetadata.digitsOnlyIsbn(req.body.isbn10);
+        return v && String(v).length === 10 ? v : null;
+      })(),
+      isbn13: (() => {
+        const v = bookMetadata.digitsOnlyIsbn(req.body.isbn13);
+        return v && String(v).length === 13 ? v : null;
+      })()
+    };
     const safeRequesterName = escapeHtml(requesterName);
     const safeRequesterEmail = escapeHtml(requesterEmail);
     const safeBookTitle = escapeHtml(bookTitle);
@@ -2448,9 +2790,17 @@ app.post('/api/book-request',
 
     // Insert request (cwa_available is false since we checked above)
     db.prepare(`
-      INSERT INTO requests (id, requester_name, requester_email, book_title, author, isbn, format, notes, status, notify_on_complete, readarr_url, status_token, cwa_available, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, requesterName, requesterEmail, bookTitle, author, isbn || null, format, notes || '', initialStatus, notifyOnComplete !== false ? 1 : 0, readarrUrl, statusToken, 0, now, now);
+      INSERT INTO requests (
+        id, requester_name, requester_email, book_title, author, isbn, format, notes, status,
+        notify_on_complete, readarr_url, status_token, cwa_available, created_at, updated_at,
+        metadata_source, metadata_source_id, cover_url, summary, publisher, published_year, isbn10, isbn13
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id, requesterName, requesterEmail, bookTitle, author, isbn || null, format, notes || '', initialStatus,
+      notifyOnComplete !== false ? 1 : 0, readarrUrl, statusToken, 0, now, now,
+      meta.source, meta.sourceId, meta.coverUrl, meta.summary, meta.publisher, meta.publishedYear, meta.isbn10, meta.isbn13
+    );
 
     addSubscriberToRequest(id, requesterName, requesterEmail, notifyOnComplete !== false);
 
@@ -2779,6 +3129,426 @@ app.post('/api/request-send-ereader',
     res.json({ success: true, sentTo: ereaderEmail, downloadLink: cwaLink });
   }
 );
+
+// ============================================
+// Requester Dashboard Routes (email-link auth)
+// ============================================
+
+// Rate limits for requester auth + metadata (SEC-003). Keyed by IP; auth-start also
+// dedupes by normalized email inside the handler.
+const requesterAuthStartLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  keyGenerator: (req) => `${req.ip}:${normalizeRequesterEmail(req.body?.email || '')}`,
+  // We intentionally key by IP+email; silence the IPv6-keyGenerator advisory.
+  validate: { keyGeneratorIpFallback: false },
+  message: { error: 'Too many login attempts. Please try again later.' }
+});
+
+const requesterAuthVerifyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  message: { error: 'Too many verification attempts. Please try again later.' }
+});
+
+const metadataSearchLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: { error: 'Too many metadata searches. Please slow down.' }
+});
+
+// Shape a request row into the requester dashboard item contract (metadata-rich).
+function buildRequesterDashboardItem(request) {
+  const normalizedStored = request.cwa_book_link
+    ? (normalizeCwaBookLink(request.cwa_book_link) || request.cwa_book_link)
+    : null;
+  const available = !!request.cwa_available || request.status === 'completed';
+  let readyLink = normalizedStored;
+  if (!readyLink && available) {
+    readyLink = buildCwaSearchLink(request.book_title, request.author);
+  }
+
+  const latest = db.prepare(`
+    SELECT status, changed_at, notes
+    FROM status_history
+    WHERE request_id = ?
+    ORDER BY changed_at DESC
+    LIMIT 1
+  `).get(request.id);
+
+  return {
+    id: request.id,
+    bookTitle: request.book_title,
+    author: request.author,
+    status: request.status,
+    format: request.format,
+    createdAt: request.created_at,
+    updatedAt: request.updated_at,
+    statusToken: request.status_token || null,
+    cwaBookLink: normalizedStored,
+    readyLink: readyLink || null,
+    available,
+    latestNote: latest?.notes || null,
+    metadata: {
+      source: request.metadata_source || null,
+      sourceId: request.metadata_source_id || null,
+      coverUrl: request.cover_url || null,
+      summary: request.summary || null,
+      publisher: request.publisher || null,
+      publishedYear: request.published_year || null,
+      isbn10: request.isbn10 || null,
+      isbn13: request.isbn13 || null,
+      isbn: request.isbn || null
+    },
+    flags: {
+      hasCover: !!request.cover_url,
+      hasSummary: !!request.summary,
+      missingIsbn: !(request.isbn13 || request.isbn10 || request.isbn)
+    }
+  };
+}
+
+// Start login: stores hashed one-time token + sends magic link. Always 200 (SEC-004).
+app.post('/api/requester/auth/start',
+  requesterAuthStartLimiter,
+  [body('email').isEmail().normalizeEmail().withMessage('Valid email is required')],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const email = normalizeRequesterEmail(req.body.email);
+    const genericResponse = {
+      success: true,
+      message: 'If that email has any requests, a sign-in link has been sent.'
+    };
+
+    try {
+      const { token, expiresAt } = requesterAuthProvider.startLogin(email, req);
+
+      const baseUrl = (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+      const verifyUrl = `${baseUrl}/requester/auth/callback?token=${encodeURIComponent(token)}`;
+      const ttlMin = requesterAuth.magicLinkTtlMin;
+
+      const emailContent = `
+        <h2 style="margin: 0 0 20px 0; font-size: 24px; font-weight: 600; color: #1d1d1f;">Sign in to your dashboard</h2>
+        <p style="margin: 0 0 15px 0; font-size: 16px; color: #1d1d1f;">
+          Click the button below to access your book requests dashboard. This link expires in ${ttlMin} minutes and can only be used once.
+        </p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${verifyUrl}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 16px;">Open My Dashboard →</a>
+        </div>
+        <p style="margin: 20px 0 0 0; font-size: 13px; color: #86868b;">If you didn't request this, you can safely ignore this email.</p>
+      `;
+      // Fire-and-forget email so response timing does not leak account existence.
+      sendEmail(email, 'Your JcubHub Books sign-in link', wrapEmailHtml(emailContent, 'Sign in')).catch(() => {});
+
+      logger.info('Requester auth start', { emailHash: hashOpaque(email)?.slice(0, 12), expiresAt });
+
+      // Test-only token echo (never in production).
+      if (requesterAuth.exposeToken) {
+        return res.status(200).json({ ...genericResponse, devToken: token });
+      }
+      return res.status(200).json(genericResponse);
+    } catch (error) {
+      logger.error('Requester auth start error', { error: error.message });
+      // Still return generic success to avoid enumeration / error-based probing.
+      return res.status(200).json(genericResponse);
+    }
+  }
+);
+
+// Verify magic link, set session cookie, redirect to dashboard.
+function handleRequesterVerify(req, res) {
+  const token = String(req.query.token || '').trim();
+  if (!token) {
+    return res.status(400).send('Missing token');
+  }
+
+  const result = requesterAuthProvider.verifyLink(token, req);
+  if (!result.ok) {
+    // Redirect back to login with an error reason for user-friendly messaging.
+    return res.redirect(`/requester/login?error=${encodeURIComponent(result.reason || 'invalid')}`);
+  }
+
+  setRequesterSessionCookie(res, result.sessionToken, result.expiresAt);
+  logger.info('Requester auth verified', { emailHash: hashOpaque(result.email)?.slice(0, 12) });
+  return res.redirect('/requester/dashboard');
+}
+
+app.get('/api/requester/auth/verify', requesterAuthVerifyLimiter, handleRequesterVerify);
+
+// Logout: revoke current session and clear cookie.
+app.post('/api/requester/auth/logout', (req, res) => {
+  try {
+    requesterAuthProvider.logout(req);
+  } catch (error) {
+    logger.warn('Requester logout error', { error: error.message });
+  }
+  clearRequesterSessionCookie(res);
+  res.json({ success: true });
+});
+
+// Current requester identity (used by the dashboard shell).
+app.get('/api/requester/me', authenticateRequesterSession, (req, res) => {
+  res.json({
+    email: req.requester.email,
+    authProvider: requesterAuthProvider.name,
+    sessionTtlHours: requesterAuth.sessionTtlHours
+  });
+});
+
+// Dashboard aggregate + items for the authenticated requester email.
+app.get('/api/requester/dashboard', authenticateRequesterSession, (req, res) => {
+  const email = req.requester.email;
+
+  const rows = db.prepare(`
+    SELECT * FROM requests
+    WHERE LOWER(requester_email) = LOWER(?)
+    ORDER BY updated_at DESC
+  `).all(email);
+
+  const counts = {
+    pending: 0, approved: 0, searching: 0, downloading: 0,
+    completed: 0, rejected: 0, unavailable: 0
+  };
+  for (const row of rows) {
+    if (Object.prototype.hasOwnProperty.call(counts, row.status)) {
+      counts[row.status] += 1;
+    }
+  }
+
+  res.json({
+    email,
+    total: rows.length,
+    counts,
+    items: rows.map(buildRequesterDashboardItem)
+  });
+});
+
+// Find a request owned by the session email (ownership enforced — RISK-003).
+function findRequesterOwnedRequest(requestId, email) {
+  return db.prepare(`
+    SELECT * FROM requests
+    WHERE id = ? AND LOWER(requester_email) = LOWER(?)
+  `).get(requestId, email);
+}
+
+// Full status timeline for an owned request.
+app.get('/api/requester/requests/:id/history',
+  authenticateRequesterSession,
+  [param('id').trim().notEmpty()],
+  (req, res) => {
+    const request = findRequesterOwnedRequest(req.params.id, req.requester.email);
+    if (!request) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+
+    const history = db.prepare(`
+      SELECT status, changed_at, notes
+      FROM status_history
+      WHERE request_id = ?
+      ORDER BY changed_at DESC
+    `).all(request.id);
+
+    res.json({ id: request.id, status: request.status, history });
+  }
+);
+
+// Send-to-eReader, scoped to ownership (reuses CWA link resolution logic).
+app.post('/api/requester/requests/:id/send-ereader',
+  authenticateRequesterSession,
+  [
+    param('id').trim().notEmpty(),
+    body('ereaderEmail').isEmail().normalizeEmail().withMessage('Valid eReader email is required')
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    if (!ereader.enabled) {
+      return res.status(400).json({ error: 'Send-to-eReader is disabled by admin' });
+    }
+    if (!transporter) {
+      return res.status(503).json({ error: 'Email transport is not configured' });
+    }
+
+    const request = findRequesterOwnedRequest(req.params.id, req.requester.email);
+    if (!request) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+    if (!(request.cwa_available || request.status === 'completed')) {
+      return res.status(409).json({ error: 'Book is not available yet' });
+    }
+
+    const ereaderEmail = req.body.ereaderEmail;
+    const domain = String(ereaderEmail || '').split('@')[1]?.toLowerCase() || '';
+    if (ereader.allowedDomains.length > 0 && !ereader.allowedDomains.includes(domain)) {
+      return res.status(400).json({
+        error: `Unsupported eReader email domain. Allowed domains: ${ereader.allowedDomains.join(', ')}`
+      });
+    }
+
+    const cwaLink = await resolveCwaLinkForRequest(request);
+    if (!cwaLink) {
+      return res.status(409).json({ error: 'No download link available yet' });
+    }
+    updateRequestCwaState(request.id, new Date().toISOString(), true, cwaLink);
+
+    const safeBookTitle = escapeHtml(request.book_title);
+    const safeAuthor = escapeHtml(request.author);
+    const ereaderContent = `
+      <h2 style="margin: 0 0 16px 0;">Your Book Link</h2>
+      <p style="margin: 0 0 10px 0;"><strong>${safeBookTitle}</strong> by ${safeAuthor}</p>
+      <p style="margin: 0 0 16px 0;">Open this link from your eReader browser or reading app:</p>
+      <p style="margin: 0;"><a href="${cwaLink}" style="color:#667eea;">${escapeHtml(cwaLink)}</a></p>
+    `;
+    await sendEmail(ereaderEmail, `Book Link: ${request.book_title} - JcubHub Books`, wrapEmailHtml(ereaderContent, 'Send to eReader'));
+
+    db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
+      request.id,
+      request.status,
+      new Date().toISOString(),
+      `Sent to eReader (${ereaderEmail}) by requester ${req.requester.email}`
+    );
+
+    res.json({ success: true, sentTo: ereaderEmail, downloadLink: cwaLink });
+  }
+);
+
+// Feedback (confirm/report match), scoped to ownership.
+app.post('/api/requester/requests/:id/feedback',
+  authenticateRequesterSession,
+  [
+    param('id').trim().notEmpty(),
+    body('feedbackType').isIn(['match_confirmed', 'match_mismatch']).withMessage('Invalid feedback type'),
+    body('message').optional().trim().isLength({ max: 1000 }).withMessage('Message too long')
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const request = findRequesterOwnedRequest(req.params.id, req.requester.email);
+    if (!request) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+
+    const { feedbackType, message } = req.body;
+    const reporter = req.requester.email;
+    const cleanMessage = String(message || '').trim();
+    const feedbackNote = feedbackType === 'match_confirmed'
+      ? `End-user confirmed monitored match (${reporter})${cleanMessage ? `: ${cleanMessage}` : ''}`
+      : `End-user reported potential wrong monitored match (${reporter})${cleanMessage ? `: ${cleanMessage}` : ''}`;
+
+    db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
+      request.id,
+      request.status,
+      new Date().toISOString(),
+      feedbackNote
+    );
+
+    if (feedbackType === 'match_mismatch') {
+      await notifyAdminLifecycle('mismatch_reported', request, { reporterEmail: reporter, message: cleanMessage });
+    }
+
+    res.json({ success: true, message: 'Feedback saved' });
+  }
+);
+
+// CSV export of requester-owned rows (deterministic column order).
+app.get('/api/requester/dashboard/export.csv', authenticateRequesterSession, (req, res) => {
+  const email = req.requester.email;
+  const rows = db.prepare(`
+    SELECT * FROM requests
+    WHERE LOWER(requester_email) = LOWER(?)
+    ORDER BY created_at DESC
+  `).all(email);
+
+  const columns = [
+    'id', 'book_title', 'author', 'status', 'format',
+    'isbn13', 'isbn10', 'isbn', 'publisher', 'published_year',
+    'created_at', 'updated_at', 'cwa_book_link'
+  ];
+
+  const escapeCsv = (value) => {
+    const str = value === null || value === undefined ? '' : String(value);
+    if (/[",\n\r]/.test(str)) {
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+  };
+
+  const lines = [columns.join(',')];
+  for (const row of rows) {
+    lines.push(columns.map(col => escapeCsv(row[col])).join(','));
+  }
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="my-book-requests.csv"');
+  res.send(lines.join('\r\n'));
+});
+
+// ============================================
+// Metadata Search Routes
+// ============================================
+
+function getCachedMetadata(queryKey) {
+  const row = db.prepare('SELECT payload, expires_at FROM book_metadata_cache WHERE query_hash = ?').get(queryKey);
+  if (!row) return null;
+  if (new Date(row.expires_at).getTime() <= Date.now()) return null;
+  try {
+    return JSON.parse(row.payload);
+  } catch {
+    return null;
+  }
+}
+
+function setCachedMetadata(queryKey, query, payload) {
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + metadata.cacheTtlMs);
+  db.prepare(`
+    INSERT INTO book_metadata_cache (query_hash, query, payload, created_at, expires_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(query_hash) DO UPDATE SET
+      payload = excluded.payload,
+      created_at = excluded.created_at,
+      expires_at = excluded.expires_at
+  `).run(queryKey, query, JSON.stringify(payload), now.toISOString(), expiresAt.toISOString());
+}
+
+// Metadata search for the requester form (cached + rate-limited).
+app.get('/api/metadata/search', metadataSearchLimiter, async (req, res) => {
+  const query = String(req.query.q || '').trim();
+  if (query.length < 2) {
+    return res.status(400).json({ error: 'Query must be at least 2 characters' });
+  }
+
+  const limit = Math.max(1, Math.min(parseInt(req.query.limit, 10) || 10, 25));
+  const queryKey = hashToken(`${metadata.primary}:${limit}:${query.toLowerCase()}`);
+
+  const cached = getCachedMetadata(queryKey);
+  if (cached) {
+    return res.json({ query, cached: true, results: cached });
+  }
+
+  try {
+    const results = await bookMetadata.searchBookMetadata(query, {
+      limit,
+      config: metadata,
+      logger
+    });
+    setCachedMetadata(queryKey, query, results);
+    res.json({ query, cached: false, results });
+  } catch (error) {
+    logger.error('Metadata search error', { query, error: error.message });
+    res.status(502).json({ error: 'Metadata provider unavailable', results: [] });
+  }
+});
 
 // ============================================
 // Authentication Routes
@@ -4191,6 +4961,17 @@ app.post('/api/admin/sync-cwa', authenticateToken, async (req, res) => {
 // Serve Admin SPA
 // ============================================
 
+// Requester pages + magic-link callback (callback shares the verify logic).
+app.get('/requester/auth/callback', requesterAuthVerifyLimiter, handleRequesterVerify);
+
+app.get('/requester/login', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'requester-login.html'));
+});
+
+app.get('/requester/dashboard', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'requester-dashboard.html'));
+});
+
 app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
@@ -4236,6 +5017,11 @@ app.listen(PORT, () => {
   logger.info(`Static files: ${path.join(__dirname, 'public')}`);
   logger.info(`Health check: http://localhost:${PORT}/api/health`);
   logger.info(`Admin panel: http://localhost:${PORT}/admin`);
+  logger.info(`Requester dashboard: http://localhost:${PORT}/requester/login`);
+
+  // Requester auth artifact cleanup: run at startup and hourly (TASK-004).
+  cleanupRequesterAuthArtifacts();
+  setInterval(cleanupRequesterAuthArtifacts, 60 * 60 * 1000);
 
   // Start auto-sync if configured
   if (automation.autoSyncInterval > 0 && integrations.cwa) {
