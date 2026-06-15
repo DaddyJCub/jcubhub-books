@@ -56,9 +56,19 @@ function str(v, max) {
 function createNativeBooksRouter(deps) {
   const {
     db, generateId, generateStatusToken, buildRequesterDashboardItem,
-    addSubscriberToRequest, searchMetadata, checkCwaAvailability, buildCwaSearchLink, log,
+    addSubscriberToRequest, searchMetadata, checkCwaAvailability, buildCwaSearchLink,
+    ereaderConfig, resolveOpenLink, sendEreader, recordFeedback, log,
   } = deps;
   const router = express.Router();
+
+  function ownedRequest(id, email) {
+    return db.prepare(
+      'SELECT * FROM requests WHERE id = ? AND LOWER(requester_email) = LOWER(?)'
+    ).get(id, email);
+  }
+  function isEmail(v) {
+    return typeof v === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
+  }
 
   router.use((req, res, next) => {
     res.set('X-JCubHub-Contract', CONTRACT);
@@ -106,6 +116,63 @@ function createNativeBooksRouter(deps) {
     } catch (err) {
       if (log) log('warn', 'native.books.metadata.error', { error: err.message });
       res.status(502).json(errBody('upstream_unavailable', 'Metadata provider unavailable'));
+    }
+  });
+
+  // GET /config — module capabilities the UI needs (e.g. send-to-eReader).
+  router.get('/config', requireCapability('books.read'), (req, res) => {
+    const er = ereaderConfig ? ereaderConfig() : { enabled: false, allowedDomains: [] };
+    res.json({ ereader: er });
+  });
+
+  // GET /requests/:id/open — resolve the freshest CWA link for an owned request.
+  router.get('/requests/:id/open', requireCapability('books.read'), async (req, res) => {
+    const request = ownedRequest(req.params.id, req.native.email);
+    if (!request) return res.status(404).json(errBody('not_found', 'Request not found'));
+    try {
+      const url = resolveOpenLink ? await resolveOpenLink(request) : request.cwa_book_link;
+      if (!url) return res.status(409).json(errBody('conflict', 'No download link available yet'));
+      res.json({ url });
+    } catch (err) {
+      if (log) log('warn', 'native.books.open.error', { id: request.id, error: err.message });
+      res.status(502).json(errBody('upstream_unavailable', 'Could not resolve the book link'));
+    }
+  });
+
+  // POST /requests/:id/send-ereader — email the book link to an eReader.
+  router.post('/requests/:id/send-ereader', requireCapability('books.write'), async (req, res) => {
+    const request = ownedRequest(req.params.id, req.native.email);
+    if (!request) return res.status(404).json(errBody('not_found', 'Request not found'));
+    const ereaderEmail = String((req.body && req.body.ereaderEmail) || '').trim();
+    if (!isEmail(ereaderEmail)) return res.status(422).json(errBody('validation_error', 'Valid eReader email is required'));
+    if (!sendEreader) return res.status(503).json(errBody('upstream_unavailable', 'Send-to-eReader not available'));
+    try {
+      const result = await sendEreader(request, ereaderEmail, req.native.email);
+      if (!result.ok) {
+        return res.status(result.status || 400).json(errBody('conflict', result.error || 'Could not send to eReader'));
+      }
+      res.json({ success: true, sentTo: ereaderEmail, downloadLink: result.downloadLink });
+    } catch (err) {
+      if (log) log('warn', 'native.books.ereader.error', { id: request.id, error: err.message });
+      res.status(502).json(errBody('upstream_unavailable', 'Could not send to eReader'));
+    }
+  });
+
+  // POST /requests/:id/feedback — confirm or report the monitored match.
+  router.post('/requests/:id/feedback', requireCapability('books.write'), async (req, res) => {
+    const request = ownedRequest(req.params.id, req.native.email);
+    if (!request) return res.status(404).json(errBody('not_found', 'Request not found'));
+    const feedbackType = (req.body && req.body.feedbackType) || '';
+    if (!['match_confirmed', 'match_mismatch'].includes(feedbackType)) {
+      return res.status(422).json(errBody('validation_error', 'Invalid feedback type'));
+    }
+    const message = str(req.body && req.body.message, 1000) || '';
+    try {
+      if (recordFeedback) await recordFeedback(request, feedbackType, message, req.native.email);
+      res.json({ success: true });
+    } catch (err) {
+      if (log) log('warn', 'native.books.feedback.error', { id: request.id, error: err.message });
+      res.status(502).json(errBody('internal_error', 'Could not save feedback'));
     }
   });
 

@@ -165,6 +165,58 @@ test('missing Idempotency-Key is rejected', async () => {
   assert.strictEqual(res.status, 400);
 });
 
+test('config reports ereader capability shape', async () => {
+  const token = mintToken({ email: 'cfg@example.com' });
+  const res = await fetch(`${BASE}/api/native/books/config`, { headers: authHeaders(token) });
+  assert.strictEqual(res.status, 200);
+  const body = await res.json();
+  assert.ok(body.ereader);
+  assert.strictEqual(typeof body.ereader.enabled, 'boolean');
+  assert.ok(Array.isArray(body.ereader.allowedDomains));
+});
+
+test('feedback on an owned request is recorded; non-owned is 404', async () => {
+  const token = mintToken({ email: 'fb@example.com' });
+  const created = await (await fetch(`${BASE}/api/native/books/requests`, {
+    method: 'POST', headers: authHeaders(token, { 'Idempotency-Key': 'fb-1' }),
+    body: JSON.stringify({ title: 'Hyperion', author: 'Simmons' }),
+  })).json();
+
+  const ok = await fetch(`${BASE}/api/native/books/requests/${created.id}/feedback`, {
+    method: 'POST', headers: authHeaders(token),
+    body: JSON.stringify({ feedbackType: 'match_confirmed' }),
+  });
+  assert.strictEqual(ok.status, 200);
+
+  const bad = await fetch(`${BASE}/api/native/books/requests/${created.id}/feedback`, {
+    method: 'POST', headers: authHeaders(token),
+    body: JSON.stringify({ feedbackType: 'nonsense' }),
+  });
+  assert.strictEqual(bad.status, 422);
+
+  const other = mintToken({ email: 'not-owner@example.com' });
+  const notOwned = await fetch(`${BASE}/api/native/books/requests/${created.id}/feedback`, {
+    method: 'POST', headers: authHeaders(other),
+    body: JSON.stringify({ feedbackType: 'match_confirmed' }),
+  });
+  assert.strictEqual(notOwned.status, 404);
+});
+
+test('send-ereader requires a valid email and is gated by admin config', async () => {
+  const token = mintToken({ email: 'er@example.com' });
+  const created = await (await fetch(`${BASE}/api/native/books/requests`, {
+    method: 'POST', headers: authHeaders(token, { 'Idempotency-Key': 'er-1' }),
+    body: JSON.stringify({ title: 'Annihilation', author: 'VanderMeer' }),
+  })).json();
+
+  // Invalid email → 422 before any send.
+  const badEmail = await fetch(`${BASE}/api/native/books/requests/${created.id}/send-ereader`, {
+    method: 'POST', headers: authHeaders(token),
+    body: JSON.stringify({ ereaderEmail: 'not-an-email' }),
+  });
+  assert.strictEqual(badEmail.status, 422);
+});
+
 test('export job produces a token-gated CSV', async () => {
   const token = mintToken({ email: 'export@example.com' });
   // seed one request

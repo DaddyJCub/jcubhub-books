@@ -3558,6 +3558,62 @@ async function nativeSearchMetadata(query, limit) {
   return results;
 }
 
+// --- Native books module helpers (reused requester actions, decoupled) ---
+function nativeEreaderConfig() {
+  return { enabled: !!ereader.enabled, allowedDomains: ereader.allowedDomains || [] };
+}
+
+async function nativeResolveOpenLink(request) {
+  const link = await resolveCwaLinkForRequest(request);
+  if (!link) return null;
+  updateRequestCwaState(request.id, new Date().toISOString(), true, link);
+  return link;
+}
+
+async function nativeSendEreader(request, ereaderEmail, requesterEmail) {
+  if (!ereader.enabled) return { ok: false, status: 400, error: 'Send-to-eReader is disabled by admin' };
+  if (!transporter) return { ok: false, status: 503, error: 'Email transport is not configured' };
+  if (!(request.cwa_available || request.status === 'completed')) {
+    return { ok: false, status: 409, error: 'Book is not available yet' };
+  }
+  const domain = String(ereaderEmail || '').split('@')[1]?.toLowerCase() || '';
+  if (ereader.allowedDomains.length > 0 && !ereader.allowedDomains.includes(domain)) {
+    return { ok: false, status: 400, error: `Unsupported eReader email domain. Allowed: ${ereader.allowedDomains.join(', ')}` };
+  }
+  const cwaLink = await resolveCwaLinkForRequest(request);
+  if (!cwaLink) return { ok: false, status: 409, error: 'No download link available yet' };
+  updateRequestCwaState(request.id, new Date().toISOString(), true, cwaLink);
+
+  const safeBookTitle = escapeHtml(request.book_title);
+  const safeAuthor = escapeHtml(request.author);
+  const content = `
+    <h2 style="margin: 0 0 16px 0;">Your Book Link</h2>
+    <p style="margin: 0 0 10px 0;"><strong>${safeBookTitle}</strong> by ${safeAuthor}</p>
+    <p style="margin: 0 0 16px 0;">Open this link from your eReader browser or reading app:</p>
+    <p style="margin: 0;"><a href="${cwaLink}" style="color:#667eea;">${escapeHtml(cwaLink)}</a></p>
+  `;
+  await sendEmail(ereaderEmail, `Book Link: ${request.book_title} - JcubHub Books`, wrapEmailHtml(content, 'Send to eReader'));
+  db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
+    request.id, request.status, new Date().toISOString(),
+    `Sent to eReader (${ereaderEmail}) by requester ${requesterEmail}`,
+  );
+  return { ok: true, downloadLink: cwaLink };
+}
+
+async function nativeRecordFeedback(request, feedbackType, message, reporter) {
+  const cleanMessage = String(message || '').trim();
+  const note = feedbackType === 'match_confirmed'
+    ? `End-user confirmed monitored match (${reporter})${cleanMessage ? `: ${cleanMessage}` : ''}`
+    : `End-user reported potential wrong monitored match (${reporter})${cleanMessage ? `: ${cleanMessage}` : ''}`;
+  db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)').run(
+    request.id, request.status, new Date().toISOString(), note,
+  );
+  if (feedbackType === 'match_mismatch') {
+    try { await notifyAdminLifecycle('mismatch_reported', request, { reporterEmail: reporter, message: cleanMessage }); }
+    catch (e) { /* admin notify is best-effort */ }
+  }
+}
+
 // ============================================
 // Authentication Routes
 // ============================================
@@ -5007,6 +5063,10 @@ app.use('/api/native/books', createNativeBooksRouter({
   searchMetadata: nativeSearchMetadata,
   checkCwaAvailability,
   buildCwaSearchLink,
+  ereaderConfig: nativeEreaderConfig,
+  resolveOpenLink: nativeResolveOpenLink,
+  sendEreader: nativeSendEreader,
+  recordFeedback: nativeRecordFeedback,
   log,
 }));
 
