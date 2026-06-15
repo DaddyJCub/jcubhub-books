@@ -5005,6 +5005,8 @@ app.use('/api/native/books', createNativeBooksRouter({
   buildRequesterDashboardItem,
   addSubscriberToRequest,
   searchMetadata: nativeSearchMetadata,
+  checkCwaAvailability,
+  buildCwaSearchLink,
   log,
 }));
 

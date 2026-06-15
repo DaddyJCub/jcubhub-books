@@ -19,8 +19,8 @@ const IDEMPOTENCY_TTL_MS = 10 * 60 * 1000;
 const idempotency = new Map();
 const exportsOwner = new Map();
 
-function rememberIdempotent(key, requestBody, response) {
-  idempotency.set(key, { requestBody: JSON.stringify(requestBody || {}), response, expires: Date.now() + IDEMPOTENCY_TTL_MS });
+function rememberIdempotent(key, requestBody, status, body) {
+  idempotency.set(key, { requestBody: JSON.stringify(requestBody || {}), status, body, expires: Date.now() + IDEMPOTENCY_TTL_MS });
 }
 function getIdempotent(key) {
   const hit = idempotency.get(key);
@@ -56,7 +56,7 @@ function str(v, max) {
 function createNativeBooksRouter(deps) {
   const {
     db, generateId, generateStatusToken, buildRequesterDashboardItem,
-    addSubscriberToRequest, searchMetadata, log,
+    addSubscriberToRequest, searchMetadata, checkCwaAvailability, buildCwaSearchLink, log,
   } = deps;
   const router = express.Router();
 
@@ -122,7 +122,9 @@ function createNativeBooksRouter(deps) {
   });
 
   // POST /requests — submit a request with full metadata (idempotent; books.write).
-  router.post('/requests', requireCapability('books.write'), (req, res) => {
+  // Mirrors the public form: blocks if the book is already in the library (CWA),
+  // and subscribes (instead of duplicating) if a matching active request exists.
+  router.post('/requests', requireCapability('books.write'), async (req, res) => {
     const idemKey = req.get('Idempotency-Key');
     if (!idemKey) return res.status(400).json(errBody('validation_error', 'Idempotency-Key header is required'));
 
@@ -132,7 +134,7 @@ function createNativeBooksRouter(deps) {
         return res.status(409).json(errBody('idempotency_replay', 'Idempotency-Key reused with a different body'));
       }
       res.set('X-Idempotency-Replay', 'true');
-      return res.status(201).json(replay.response);
+      return res.status(replay.status).json(replay.body);
     }
 
     const b = req.body || {};
@@ -142,6 +144,58 @@ function createNativeBooksRouter(deps) {
     const format = VALID_FORMATS.includes(b.format) ? b.format : 'any';
     const notes = str(b.notes, 2000) || '';
     const isbn = str(b.isbn || b.isbn13 || b.isbn10, 17);
+    const email = req.native.email;
+    const name = req.native.username || email;
+    const notify = b.notifyOnComplete !== false;
+
+    // 1. Already in the library? Block the request and point at the library copy.
+    if (checkCwaAvailability) {
+      try {
+        const cwa = await checkCwaAvailability(title, author, isbn || '');
+        if (cwa && cwa.available) {
+          const body = {
+            alreadyAvailable: true,
+            message: 'This book is already available in the library.',
+            bookLink: cwa.bookLink || (buildCwaSearchLink ? buildCwaSearchLink(title, author) : null),
+          };
+          rememberIdempotent(idemKey, req.body, 200, body);
+          if (log) log('info', 'native.books.request.already_available', { title, author, email });
+          return res.status(200).json(body);
+        }
+      } catch (e) { /* availability check is best-effort — fall through to create */ }
+    }
+
+    // 2. Matching active request already exists? Subscribe instead of duplicating.
+    const existing = db.prepare(
+      `SELECT * FROM requests
+       WHERE status IN ('pending','approved','searching','downloading')
+         AND LOWER(TRIM(book_title)) = LOWER(TRIM(?))
+         AND LOWER(TRIM(author)) = LOWER(TRIM(?))
+       ORDER BY created_at DESC LIMIT 1`
+    ).get(title, author);
+    if (existing) {
+      const isOwner = String(existing.requester_email || '').toLowerCase() === email.toLowerCase();
+      const subscribed = db.prepare(
+        'SELECT 1 FROM request_subscribers WHERE request_id = ? AND LOWER(subscriber_email) = LOWER(?) LIMIT 1'
+      ).get(existing.id, email);
+      if (!isOwner && !subscribed && addSubscriberToRequest) {
+        try { addSubscriberToRequest(existing.id, name, email, notify); } catch (e) { /* best-effort */ }
+      }
+      const body = {
+        subscribedToExisting: true,
+        requestId: existing.id,
+        status: existing.status,
+        message: isOwner || subscribed
+          ? 'You already have a request for this book.'
+          : 'A matching request already exists — you have been subscribed for updates.',
+        item: buildRequesterDashboardItem(existing),
+      };
+      rememberIdempotent(idemKey, req.body, 200, body);
+      if (log) log('info', 'native.books.request.subscribed_existing', { id: existing.id, email });
+      return res.status(200).json(body);
+    }
+
+    // 3. Create.
     const meta = {
       source: str(b.source, 50),
       sourceId: str(b.sourceId, 300),
@@ -152,8 +206,6 @@ function createNativeBooksRouter(deps) {
       isbn10: str(b.isbn10, 13),
       isbn13: str(b.isbn13, 17),
     };
-    const notify = b.notifyOnComplete !== false;
-
     const now = new Date().toISOString();
     const id = generateId();
     const statusToken = generateStatusToken ? generateStatusToken() : null;
@@ -165,15 +217,13 @@ function createNativeBooksRouter(deps) {
         metadata_source, metadata_source_id, cover_url, summary, publisher, published_year, isbn10, isbn13
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
-      id, req.native.username || req.native.email, req.native.email, title, author, isbn, format, notes,
+      id, name, email, title, author, isbn, format, notes,
       notify ? 1 : 0, statusToken, now, now,
       meta.source, meta.sourceId, meta.coverUrl, meta.summary, meta.publisher, meta.publishedYear, meta.isbn10, meta.isbn13,
     );
 
     try {
-      if (addSubscriberToRequest) {
-        addSubscriberToRequest(id, req.native.username || req.native.email, req.native.email, notify);
-      }
+      if (addSubscriberToRequest) addSubscriberToRequest(id, name, email, notify);
     } catch (e) { /* subscriber is best-effort */ }
     try {
       db.prepare('INSERT INTO status_history (request_id, status, changed_at, notes) VALUES (?, ?, ?, ?)')
@@ -181,8 +231,8 @@ function createNativeBooksRouter(deps) {
     } catch (e) { /* history is best-effort */ }
 
     const item = dashItem(id);
-    rememberIdempotent(idemKey, req.body, item);
-    if (log) log('info', 'native.books.request.created', { id, email: req.native.email });
+    rememberIdempotent(idemKey, req.body, 201, item);
+    if (log) log('info', 'native.books.request.created', { id, email });
     res.status(201).json(item);
   });
 
@@ -191,12 +241,12 @@ function createNativeBooksRouter(deps) {
     const idemKey = req.get('Idempotency-Key');
     if (!idemKey) return res.status(400).json(errBody('validation_error', 'Idempotency-Key header is required'));
     const replay = getIdempotent(idemKey);
-    if (replay) { res.set('X-Idempotency-Replay', 'true'); return res.status(202).json(replay.response); }
+    if (replay) { res.set('X-Idempotency-Replay', 'true'); return res.status(replay.status).json(replay.body); }
 
     const id = generateId();
     const response = { id, status: 'ready', download_url: `/api/native/books/exports/${id}/download` };
     exportsOwner.set(id, { email: req.native.email, expires: Date.now() + IDEMPOTENCY_TTL_MS });
-    rememberIdempotent(idemKey, req.body, response);
+    rememberIdempotent(idemKey, req.body, 202, response);
     res.status(202).json(response);
   });
 

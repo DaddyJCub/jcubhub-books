@@ -135,6 +135,27 @@ test('submit is idempotent and scoped to the caller email', async () => {
   assert.ok(!theirs.items.some((r) => r.id === created.id));
 });
 
+test('duplicate active request subscribes instead of creating a second', async () => {
+  const token = mintToken({ email: 'dup@example.com' });
+
+  const first = await fetch(`${BASE}/api/native/books/requests`, {
+    method: 'POST', headers: authHeaders(token, { 'Idempotency-Key': 'dup-a' }),
+    body: JSON.stringify({ title: 'Neuromancer', author: 'Gibson' }),
+  });
+  assert.strictEqual(first.status, 201);
+  const created = await first.json();
+
+  // Same title+author, different idempotency key → must not create a duplicate.
+  const second = await fetch(`${BASE}/api/native/books/requests`, {
+    method: 'POST', headers: authHeaders(token, { 'Idempotency-Key': 'dup-b' }),
+    body: JSON.stringify({ title: 'Neuromancer', author: 'Gibson' }),
+  });
+  assert.strictEqual(second.status, 200);
+  const body = await second.json();
+  assert.strictEqual(body.subscribedToExisting, true);
+  assert.strictEqual(body.requestId, created.id);
+});
+
 test('missing Idempotency-Key is rejected', async () => {
   const token = mintToken({ email: 'owner@example.com' });
   const res = await fetch(`${BASE}/api/native/books/requests`, {
