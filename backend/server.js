@@ -3104,8 +3104,11 @@ const requesterAuthStartLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
   keyGenerator: (req) => `${req.ip}:${normalizeRequesterEmail(req.body?.email || '')}`,
-  // We intentionally key by IP+email; silence the IPv6-keyGenerator advisory.
-  validate: { keyGeneratorIpFallback: false },
+  // We intentionally key by IP+email; disable startup validation advisories for
+  // this limiter (the option name for the IPv6-keyGenerator check changed across
+  // express-rate-limit 7.x — `validate:false` is version-robust and only silences
+  // startup warnings, not runtime limiting).
+  validate: false,
   message: { error: 'Too many login attempts. Please try again later.' }
 });
 
