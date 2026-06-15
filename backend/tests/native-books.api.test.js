@@ -102,8 +102,11 @@ test('submit is idempotent and scoped to the caller email', async () => {
   assert.strictEqual(first.status, 201);
   const created = await first.json();
   assert.ok(created.id);
-  assert.strictEqual(created.title, 'Dune');
+  // POST now returns the rich requester-dashboard item (bookTitle, author, metadata).
+  assert.strictEqual(created.bookTitle, 'Dune');
+  assert.strictEqual(created.author, 'Herbert');
   assert.strictEqual(created.status, 'pending');
+  assert.ok(created.metadata, 'rich item includes metadata');
 
   // Replay with same key + body returns the same result.
   const replay = await fetch(`${BASE}/api/native/books/requests`, {
