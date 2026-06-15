@@ -3544,6 +3544,20 @@ app.get('/api/metadata/search', metadataSearchLimiter, async (req, res) => {
   }
 });
 
+// Cached metadata search reused by the native books API (same cache as the
+// public /api/metadata/search endpoint).
+async function nativeSearchMetadata(query, limit) {
+  const q = String(query || '').trim();
+  if (q.length < 2) return [];
+  const lim = Math.max(1, Math.min(parseInt(limit, 10) || 10, 25));
+  const key = hashToken(`${metadata.primary}:${lim}:${q.toLowerCase()}`);
+  const cached = getCachedMetadata(key);
+  if (cached) return cached;
+  const results = await bookMetadata.searchBookMetadata(q, { limit: lim, config: metadata, logger });
+  setCachedMetadata(key, q, results);
+  return results;
+}
+
 // ============================================
 // Authentication Routes
 // ============================================
@@ -4987,7 +5001,10 @@ app.get('/requester/login', (req, res) => {
 app.use('/api/native/books', createNativeBooksRouter({
   db,
   generateId,
+  generateStatusToken,
   buildRequesterDashboardItem,
+  addSubscriberToRequest,
+  searchMetadata: nativeSearchMetadata,
   log,
 }));
 
