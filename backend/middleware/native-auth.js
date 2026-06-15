@@ -36,12 +36,21 @@ function requireBrokerAuth(req, res, next) {
   const header = req.headers.authorization || '';
   const match = header.match(/^Bearer\s+(.+)$/i);
   if (!match) {
+    console.warn('[native-auth] 401: no Bearer Authorization header');
     return res.status(401).json(errorBody('unauthorized', 'Missing Bearer token'));
   }
   let payload;
   try {
     payload = jwt.verify(match[1], key, { algorithms: ['HS256'], issuer: ISSUER });
   } catch (err) {
+    // Distinct, secret-safe diagnostic so the cause is visible in books logs:
+    //   "invalid signature" -> IDENTITY_TOKEN_SIGNING_SECRET differs from central
+    //   "jwt expired"        -> token TTL elapsed (clock skew / very short TTL)
+    //   "jwt issuer invalid" -> issuer mismatch
+    // A short, non-reversible fingerprint of the key (first 8 hex of its sha256)
+    // lets you compare both sides without exposing the secret.
+    const fp = crypto.createHash('sha256').update(key).digest('hex').slice(0, 8);
+    console.warn(`[native-auth] 401: verify failed (${err.name}: ${err.message}); key_fp=${fp}`);
     return res.status(401).json(errorBody('unauthorized', 'Invalid or expired token'));
   }
   if (!payload.email) {
