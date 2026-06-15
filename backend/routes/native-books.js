@@ -224,6 +224,11 @@ function createNativeBooksRouter(deps) {
             alreadyAvailable: true,
             message: 'This book is already available in the library.',
             bookLink: cwa.bookLink || (buildCwaSearchLink ? buildCwaSearchLink(title, author) : null),
+            book: {
+              title: cwa.matchedTitle || title,
+              author: cwa.matchedAuthor || author,
+              coverUrl: safeCover(b.coverUrl),
+            },
           };
           rememberIdempotent(idemKey, req.body, 200, body);
           if (log) log('info', 'native.books.request.already_available', { title, author, email });
