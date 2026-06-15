@@ -14,6 +14,7 @@ const jwt = require('jsonwebtoken');
 const Database = require('better-sqlite3');
 const crypto = require('crypto');
 const bookMetadata = require('./services/book-metadata');
+const { createNativeBooksRouter } = require('./routes/native-books');
 
 const app = express();
 const PORT = process.env.PORT || 3003;
@@ -4975,6 +4976,17 @@ app.get('/requester/auth/callback', requesterAuthVerifyLimiter, handleRequesterV
 app.get('/requester/login', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'requester-login.html'));
 });
+
+// ============================================
+// Native JCubHub Apps API (Bearer broker tokens, no cookies)
+// Contract: books/1.0.0. Mounted before the SPA catch-all below.
+// ============================================
+app.use('/api/native/books', createNativeBooksRouter({
+  db,
+  generateId,
+  buildRequesterDashboardItem,
+  log,
+}));
 
 app.get('/requester/dashboard', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'requester-dashboard.html'));
