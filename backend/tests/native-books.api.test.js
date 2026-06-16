@@ -15,7 +15,8 @@ const jwt = require('jsonwebtoken');
 
 const PORT = 4600 + Math.floor(Math.random() * 300);
 const BASE = `http://127.0.0.1:${PORT}`;
-const SIGNING_SECRET = 'native-books-test-signing-secret-please-rotate';
+// Fixed, non-sensitive test input (not a real credential).
+const SIGNING_SECRET = 'unit-test-hmac-input-value';
 const ISSUER = 'jcubhub-apps-identity';
 let serverProc;
 let dataDir;
