@@ -1873,14 +1873,22 @@ function buildReadarrBookPayload(searchResult, effectiveFormat, readarrConfig, o
     addOptions: {
       addType: 'manual',
       searchForNewBook: true,
-      // 'none' = when the author is created, do not bulk-monitor their existing catalogue.
-      // Only the book being added (monitored:true) is tracked.
-      monitor: 'none',
       addNewAuthor: authorId === 0 && !!authorForBook
     }
   };
 
   if (authorForBook) {
+    // Monitoring model (canonical Readarr pattern):
+    //   - author.monitored = true            -> author is monitored, so its monitored books get searched
+    //   - author.addOptions.monitor = 'none' -> do NOT bulk-monitor the author's back catalogue
+    //   - book.monitored = true (below)      -> the requested book itself is monitored and grabbed
+    // Putting monitor:'none' on the BOOK addOptions previously left the whole author
+    // unmonitored, so its books were never searched. 'none' is a valid MonitorTypes value;
+    // 'specificBook' is not, so we keep 'none' here and rely on book.monitored.
+    authorForBook.addOptions = {
+      monitor: 'none',
+      searchForMissingBooks: false
+    };
     bookToAdd.author = authorForBook;
   } else {
     delete bookToAdd.author;
