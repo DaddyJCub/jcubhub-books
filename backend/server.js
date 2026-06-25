@@ -2478,8 +2478,11 @@ function cleanupRequesterAuthArtifacts() {
     const sessions = db.prepare(
       'DELETE FROM requester_sessions WHERE expires_at < ? OR revoked_at IS NOT NULL'
     ).run(now);
+    // Also purge any empty-result entries cached by older builds: an empty payload means a
+    // transient provider failure was cached, which makes a findable book show "No matches
+    // found" until expiry. We no longer cache empties, so this self-heals on next cleanup.
     const caches = db.prepare(
-      'DELETE FROM book_metadata_cache WHERE expires_at < ?'
+      "DELETE FROM book_metadata_cache WHERE expires_at < ? OR payload = '[]'"
     ).run(now);
     logger.debug('Requester auth cleanup complete', {
       magicLinksDeleted: links.changes,
