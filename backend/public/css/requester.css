@@ -253,4 +253,14 @@
   .requester-header { flex-direction: column; align-items: flex-start; }
   .metadata-module .metadata-result { grid-template-columns: 40px 1fr; }
   .metadata-module .metadata-result .btn { grid-column: 1 / -1; }
+  /* >=16px keeps iOS Safari from auto-zooming on focus. */
+  .requester-shell .toolbar input[type="search"],
+  .requester-shell .toolbar select,
+  .requester-shell .inline-form input { font-size: 16px; }
+  /* Comfortable touch targets for filter chips. */
+  .requester-shell .filter-chip {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+  }
 }

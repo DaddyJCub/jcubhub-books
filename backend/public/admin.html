@@ -496,14 +496,135 @@
         text-align: center;
       }
 
-      .requests-table {
+      /* Action buttons must wrap instead of overflowing off-screen. */
+      .admin-actions {
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+
+      /* Two compact stat cards per row instead of one tall column. */
+      .stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 12px;
+      }
+
+      /* Stack the section title, search, and filter tabs vertically. */
+      .section-header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 14px;
+      }
+
+      .section-header > div {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 12px;
+        width: 100%;
+      }
+
+      .section-header input[type="text"] {
+        width: 100% !important;
+        box-sizing: border-box;
+        /* >=16px avoids iOS Safari focus zoom. */
+        font-size: 16px;
+      }
+
+      /* Turn each table row into a self-contained card (no horizontal scroll). */
+      .requests-table,
+      .requests-table tbody,
+      .requests-table tr,
+      .requests-table td {
         display: block;
-        overflow-x: auto;
+        width: 100%;
+      }
+
+      .requests-table thead {
+        display: none;
+      }
+
+      .requests-table tr {
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid var(--border-light);
+        border-radius: var(--radius-md);
+        padding: 14px 16px;
+        margin-bottom: 14px;
+      }
+
+      .requests-table td {
+        border-bottom: none;
+        padding: 7px 0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 14px;
+        text-align: right;
+      }
+
+      /* Per-cell label from the data-label attribute. */
+      .requests-table td::before {
+        content: attr(data-label);
+        color: var(--text-muted);
+        font-size: 0.72rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        text-align: left;
+        flex: 0 0 auto;
+      }
+
+      /* Book = card title (full width, no label). */
+      .requests-table td[data-label="Book"] {
+        display: block;
+        text-align: left;
+        padding: 0 0 10px;
+        margin-bottom: 6px;
+        border-bottom: 1px solid var(--border-light);
+      }
+      .requests-table td[data-label="Book"]::before { display: none; }
+
+      /* Requester = label stacked above value. */
+      .requests-table td[data-label="Requester"] {
+        display: block;
+        text-align: left;
+      }
+      .requests-table td[data-label="Requester"]::before {
+        display: block;
+        margin-bottom: 2px;
+      }
+
+      /* Actions = full-width wrapping button row (no label). */
+      .requests-table td.actions-cell {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: flex-start;
+        padding-top: 12px;
+        margin-top: 6px;
+        border-top: 1px solid var(--border-light);
+      }
+      .requests-table td.actions-cell::before { display: none; }
+      .requests-table td.actions-cell .action-btn {
+        margin: 0;
+        flex: 0 0 auto;
+        min-width: 44px;
+        min-height: 44px;
+        padding: 8px 14px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.9rem;
       }
 
       .filter-tabs {
         flex-wrap: wrap;
         justify-content: center;
+      }
+
+      /* Comfortable touch targets for the filter tabs. */
+      .filter-tab {
+        min-height: 44px;
+        display: inline-flex;
+        align-items: center;
       }
     }
   </style>
@@ -1790,24 +1911,24 @@ request:BR-1234567890-abc123 | epub" style="width: 100%; min-height: 120px; resi
           <tbody>
             ${filteredRequests.map(req => `
               <tr>
-                <td>
+                <td data-label="Book">
                   <strong>${escapeHtml(req.book_title)}</strong><br>
                   <span style="color: var(--text-muted); font-size: 0.9rem;">by ${escapeHtml(req.author)}</span>
                   ${req.isbn ? `<br><span style="color: var(--primary); font-size: 0.8rem;">ISBN: ${escapeHtml(req.isbn)}</span>` : ''}
                 </td>
-                <td>
+                <td data-label="Requester">
                   ${escapeHtml(req.requester_name)}<br>
                   <span style="color: var(--text-muted); font-size: 0.85rem;">${escapeHtml(req.requester_email)}</span>
                 </td>
-                <td style="text-transform: uppercase;">${req.format}</td>
-                <td><span class="status-badge status-${req.status}">${req.status}</span></td>
-                <td>
+                <td data-label="Format" style="text-transform: uppercase;">${req.format}</td>
+                <td data-label="Status"><span class="status-badge status-${req.status}">${req.status}</span></td>
+                <td data-label="CWA">
                   <span class="cwa-badge ${req.cwa_available ? '' : 'unavailable'}">
                     ${req.cwa_available ? '✓ Available' : '✗ Not found'}
                   </span>
                 </td>
-                <td>${formatDate(req.created_at)}</td>
-                <td>
+                <td data-label="Date">${formatDate(req.created_at)}</td>
+                <td data-label="Actions" class="actions-cell">
                   ${getQuickActions(req)}
                 </td>
               </tr>

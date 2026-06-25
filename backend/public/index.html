@@ -51,7 +51,7 @@
 
   <!-- Footer -->
   <div class="footer">
-    <p>© 2024 JcubHub Books</p>
+    <p>© <span id="footerYear">2024</span> JcubHub Books</p>
     <a href="#" class="admin-link" id="trackRequestBtn">Track Request</a>
     <a href="/requester/login" class="admin-link admin-link-dashboard">My Dashboard</a>
     <a href="/admin" class="admin-link">Admin</a>
@@ -293,8 +293,11 @@
       });
     }
 
+    let turnstileRendered = false;
+
     function onTurnstileSuccess(token) {
       turnstileToken = token;
+      clearTurnstileFallback();
       document.getElementById('submitBtn').disabled = false;
     }
 
@@ -303,14 +306,37 @@
       document.getElementById('submitBtn').disabled = true;
     }
 
+    // Surface a clear message when the captcha can't load, so the submit
+    // button isn't left silently disabled with no explanation.
+    function showTurnstileFallback() {
+      if (turnstileToken) return;
+      const c = document.getElementById('turnstileWidget');
+      if (c && !c.querySelector('.turnstile-fallback')) {
+        c.innerHTML = '<div class="turnstile-fallback" role="alert">⚠️ Verification couldn\'t load. Check your connection, then refresh the page to submit your request.</div>';
+      }
+    }
+
+    function clearTurnstileFallback() {
+      const fb = document.querySelector('#turnstileWidget .turnstile-fallback');
+      if (fb) fb.remove();
+    }
+
+    function onTurnstileError() {
+      turnstileToken = null;
+      document.getElementById('submitBtn').disabled = true;
+      showTurnstileFallback();
+    }
+
     // Initialize Turnstile when API is ready
     function initTurnstile() {
       if (typeof turnstile !== 'undefined' && document.getElementById('turnstileWidget')) {
         turnstileWidgetId = turnstile.render('#turnstileWidget', {
           sitekey: '0x4AAAAAABznZ0it4DVwFAV4',
           callback: onTurnstileSuccess,
-          'expired-callback': onTurnstileExpired
+          'expired-callback': onTurnstileExpired,
+          'error-callback': onTurnstileError
         });
+        turnstileRendered = turnstileWidgetId !== undefined;
       }
     }
 
@@ -323,6 +349,13 @@
         setTimeout(initTurnstile, 100);
       });
     }
+
+    // Safety net: if verification still hasn't loaded after 8s, tell the user.
+    setTimeout(function () {
+      if (!turnstileToken && (typeof turnstile === 'undefined' || !turnstileRendered)) {
+        showTurnstileFallback();
+      }
+    }, 8000);
 
     // Form visibility
     function showRequestForm() {
@@ -793,6 +826,26 @@
     });
     document.getElementById('checkStatusBtn').addEventListener('click', checkRequestStatus);
     document.getElementById('closeStatusBtn').addEventListener('click', hideStatusPopup);
+
+    // Make the home cards operable by keyboard / screen reader (they are
+    // <div>s acting as buttons).
+    ['requestCard', 'downloadCard'].forEach(function (id) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.setAttribute('role', 'button');
+      el.setAttribute('tabindex', '0');
+      el.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.click(); }
+      });
+    });
+    document.getElementById('requestCard').setAttribute('aria-label', 'Request a book');
+    document.getElementById('downloadCard').setAttribute('aria-label', 'Download books from the library');
+
+    // Keep the footer copyright year current.
+    (function () {
+      const y = document.getElementById('footerYear');
+      if (y) y.textContent = new Date().getFullYear();
+    })();
   </script>
 </body>
 </html>

@@ -272,6 +272,12 @@ body::before {
   box-shadow: var(--shadow-lg);
 }
 
+/* Visible focus ring now that the cards are keyboard-focusable. */
+.card:focus-visible {
+  outline: 3px solid var(--primary);
+  outline-offset: 3px;
+}
+
 /* Glass overlay effect */
 .card::before {
   content: "";
@@ -501,6 +507,19 @@ body::before {
   display: flex;
   justify-content: center;
   margin: 20px 0;
+}
+
+/* Shown when the captcha fails to load. */
+.turnstile-fallback {
+  width: 100%;
+  text-align: center;
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+  color: var(--warning);
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
 }
 
 /* ============================================
@@ -849,10 +868,11 @@ body::before {
   display: inline-block;
   margin-top: 8px;
   margin-left: 6px;
-  color: var(--text-dim);
+  padding: 6px 8px;
+  color: var(--text-muted);
   text-decoration: none;
-  font-size: 0.75rem;
-  opacity: 0.5;
+  font-size: 0.8rem;
+  opacity: 0.85;
   transition: all var(--transition-base);
 }
 
@@ -1025,7 +1045,8 @@ body::before {
   .form-group textarea,
   .form-group select {
     padding: 10px 14px;
-    font-size: 0.95rem;
+    /* Keep >=16px so iOS Safari doesn't auto-zoom the form on focus. */
+    font-size: 1rem;
   }
 
   .submit-button {
