@@ -3544,7 +3544,12 @@ app.get('/api/metadata/search', metadataSearchLimiter, async (req, res) => {
       config: metadata,
       logger
     });
-    setCachedMetadata(queryKey, query, results);
+    // Never cache empty results: a transient provider failure (OpenLibrary timeout or a
+    // Google Books 429) would otherwise poison the 24h cache and make a findable book
+    // show "No matches found" until the entry expires.
+    if (Array.isArray(results) && results.length > 0) {
+      setCachedMetadata(queryKey, query, results);
+    }
     res.json({ query, cached: false, results });
   } catch (error) {
     logger.error('Metadata search error', { query, error: error.message });
@@ -3562,7 +3567,11 @@ async function nativeSearchMetadata(query, limit) {
   const cached = getCachedMetadata(key);
   if (cached) return cached;
   const results = await bookMetadata.searchBookMetadata(q, { limit: lim, config: metadata, logger });
-  setCachedMetadata(key, q, results);
+  // Don't cache empty results (see /api/metadata/search) to avoid poisoning the cache on a
+  // transient provider failure.
+  if (Array.isArray(results) && results.length > 0) {
+    setCachedMetadata(key, q, results);
+  }
   return results;
 }
 

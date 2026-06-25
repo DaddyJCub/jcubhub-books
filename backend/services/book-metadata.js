@@ -79,7 +79,7 @@ function normalizeCandidate(partial) {
   };
 }
 
-async function fetchJson(url, { timeoutMs = 8000, headers = {} } = {}) {
+async function fetchJsonOnce(url, { timeoutMs = 8000, headers = {} } = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -92,6 +92,24 @@ async function fetchJson(url, { timeoutMs = 8000, headers = {} } = {}) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// Retry once on transient failures (network error/abort, 429, or 5xx). Providers like
+// OpenLibrary occasionally drop a connection and Google Books rate-limits unkeyed callers;
+// a single retry turns most of those intermittent "no results" into hits.
+async function fetchJson(url, options = {}) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const result = await fetchJsonOnce(url, options);
+      if (result.ok || (result.status !== 429 && result.status < 500)) {
+        return result;
+      }
+    } catch (error) {
+      if (attempt === 1) throw error;
+    }
+    await new Promise(resolve => setTimeout(resolve, 400));
+  }
+  return { ok: false, status: 0, data: null };
 }
 
 function mapOpenLibraryDoc(doc, baseUrl) {
@@ -121,10 +139,13 @@ function mapOpenLibraryDoc(doc, baseUrl) {
   });
 }
 
-async function searchOpenLibrary(query, limit, config) {
+async function searchOpenLibrary(query, limit, config, searchField = 'q') {
   const base = config.openLibraryUrl || DEFAULT_OPEN_LIBRARY_URL;
   const url = new URL('/search.json', base);
-  url.searchParams.set('q', query);
+  // searchField is normally 'q' (general). The structured 'title=' query is used as a
+  // fallback because the general q-search can miss exact titles, especially ones that
+  // start with a stopword (e.g. "A Touch of Chaos").
+  url.searchParams.set(searchField, query);
   url.searchParams.set('limit', String(limit));
   url.searchParams.set('fields', 'key,title,author_name,first_publish_year,isbn,cover_i,cover_edition_key,publisher,first_sentence');
 
@@ -187,11 +208,30 @@ async function searchBookMetadata(query, { limit = 10, config = {}, logger = nul
   };
 
   let results = await runProvider(primary);
+
+  // When OpenLibrary's general q-search returns nothing, retry with the structured title=
+  // field before changing providers — this reliably surfaces exact titles the q-search misses.
+  if (results.length === 0 && primary === 'openlibrary') {
+    try {
+      results = await searchOpenLibrary(cleanQuery, cappedLimit, config, 'title');
+    } catch (error) {
+      if (logger) logger.warn('OpenLibrary title fallback failed', { error: error.message });
+    }
+  }
+
   if (results.length === 0) {
     const fallback = primary === 'openlibrary' ? 'googlebooks' : 'openlibrary';
     // Only try Google Books fallback when it is usable without a key, or a key is set.
     if (fallback === 'openlibrary' || config.googleBooksKey || fallback === 'googlebooks') {
       results = await runProvider(fallback);
+    }
+    // If we fell back to OpenLibrary, give it the title= retry too.
+    if (results.length === 0 && fallback === 'openlibrary') {
+      try {
+        results = await searchOpenLibrary(cleanQuery, cappedLimit, config, 'title');
+      } catch (error) {
+        if (logger) logger.warn('OpenLibrary title fallback failed', { error: error.message });
+      }
     }
   }
 
