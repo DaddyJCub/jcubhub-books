@@ -15,6 +15,7 @@ const Database = require('better-sqlite3');
 const crypto = require('crypto');
 const bookMetadata = require('./services/book-metadata');
 const { createNativeBooksRouter } = require('./routes/native-books');
+const bugReporter = require('./bugReporter');
 
 const app = express();
 const PORT = process.env.PORT || 3003;
@@ -5090,6 +5091,9 @@ app.use('/api/native/books', createNativeBooksRouter({
   log,
 }));
 
+// JCubHub Sentinel: client-side JS error beacon (browser → CM via this server).
+app.post('/client-error', bugReporter.clientErrorHandler);
+
 app.get('/requester/dashboard', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'requester-dashboard.html'));
 });
@@ -5111,9 +5115,12 @@ app.get('{*splat}', (req, res) => {
 // Global Error Handler
 // ============================================
 
+// JCubHub Sentinel: forward unhandled request errors to CM (before the responder).
+app.use(bugReporter.expressErrorReporter);
+
 app.use((err, req, res, next) => {
-  logger.error('Express error', { 
-    error: err.message, 
+  logger.error('Express error', {
+    error: err.message,
     stack: err.stack,
     path: req.path,
     method: req.method,
@@ -5214,9 +5221,15 @@ process.on('SIGTERM', () => {
 // Unhandled error logging
 process.on('uncaughtException', (error) => {
   logger.error('Uncaught Exception', { error: error.message, stack: error.stack });
+  try { bugReporter.reportException(error, { severity: 'critical', context: { source: 'uncaughtException' } }); } catch (_) {}
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   logger.error('Unhandled Rejection', { reason: String(reason) });
+  try {
+    bugReporter.reportException(reason instanceof Error ? reason : new Error(String(reason)), {
+      severity: 'high', context: { source: 'unhandledRejection' },
+    });
+  } catch (_) {}
 });
