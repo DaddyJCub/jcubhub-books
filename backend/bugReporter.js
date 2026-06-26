@@ -10,9 +10,6 @@ const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 
-const URL_ = (process.env.BUG_REPORT_URL || '').trim();
-const SECRET = (process.env.BUG_REPORT_SECRET || '').trim();
-const APP_ID = (process.env.BUG_APP_ID || 'books').trim();
 const ENVIRONMENT = process.env.ENVIRONMENT || 'production';
 const APP_VERSION = process.env.APP_VERSION || null;
 const TIMEOUT_MS = parseInt(process.env.BUG_REPORT_TIMEOUT_MS || '5000', 10);
@@ -21,12 +18,46 @@ const THROTTLE_MS = 60000;
 const recent = new Map();
 let inReport = false;
 
-function enabled() {
-  return Boolean(URL_ && SECRET);
+// Config is resolved at report time so it can be managed in the admin UI (DB
+// app_settings) with no redeploy. configure() injects a getter(key)->value|null;
+// env vars remain as a fallback. Keys: bug_report_enabled, bug_report_url,
+// bug_report_secret, bug_app_id.
+let settingGetter = null;
+
+function configure(getter) {
+  settingGetter = getter;
 }
 
-function fingerprint(message, stack) {
-  const basis = `${APP_ID}|${String(message).slice(0, 200)}|${String(stack || '').slice(0, 200)}`;
+function cfg(key, env, def = '') {
+  if (settingGetter) {
+    try {
+      const v = settingGetter(key);
+      if (v != null && String(v).trim()) return String(v).trim();
+    } catch (_) {}
+  }
+  return (process.env[env] || def).trim();
+}
+
+function reportUrl() { return cfg('bug_report_url', 'BUG_REPORT_URL'); }
+function reportSecret() { return cfg('bug_report_secret', 'BUG_REPORT_SECRET'); }
+function appId() { return cfg('bug_app_id', 'BUG_APP_ID', 'books') || 'books'; }
+
+function explicitlyDisabled() {
+  if (settingGetter) {
+    try {
+      const v = String(settingGetter('bug_report_enabled') || '').trim().toLowerCase();
+      if (['0', 'false', 'no', 'off'].includes(v)) return true;
+    } catch (_) {}
+  }
+  return false;
+}
+
+function enabled() {
+  return !explicitlyDisabled() && Boolean(reportUrl() && reportSecret());
+}
+
+function fingerprint(message, stack, app_id) {
+  const basis = `${app_id}|${String(message).slice(0, 200)}|${String(stack || '').slice(0, 200)}`;
   return crypto.createHash('sha256').update(basis).digest('hex').slice(0, 16);
 }
 
@@ -38,11 +69,11 @@ function throttled(fp) {
   return false;
 }
 
-function post(payload) {
+function post(payload, url, secret, app_id) {
   try {
     const body = Buffer.from(JSON.stringify(payload), 'utf8');
-    const sig = crypto.createHmac('sha256', SECRET).update(body).digest('hex');
-    const u = new URL(URL_);
+    const sig = crypto.createHmac('sha256', secret).update(body).digest('hex');
+    const u = new URL(url);
     const lib = u.protocol === 'https:' ? https : http;
     const req = lib.request(
       {
@@ -54,7 +85,7 @@ function post(payload) {
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': body.length,
-          'X-JCubHub-App': APP_ID,
+          'X-JCubHub-App': app_id,
           'X-JCubHub-Signature': `sha256=${sig}`,
           'X-JCubHub-Report-Contract': '1.0.0',
         },
@@ -74,12 +105,13 @@ function report(opts = {}) {
   if (!enabled() || inReport) return;
   try {
     inReport = true;
+    const app_id = appId();
     const message = String(opts.message || 'error').slice(0, 4000);
     const stack = opts.stack ? String(opts.stack).slice(0, 16000) : null;
-    const fp = fingerprint(message, stack);
+    const fp = fingerprint(message, stack, app_id);
     if (throttled(fp)) return;
     const payload = {
-      app_id: APP_ID,
+      app_id,
       type: opts.type || 'error',
       message,
       severity: opts.severity || undefined,
@@ -96,7 +128,7 @@ function report(opts = {}) {
       context: opts.context || undefined,
       occurred_at: new Date().toISOString(),
     };
-    post(payload);
+    post(payload, reportUrl(), reportSecret(), app_id);
   } catch (_) {
     /* fail open */
   } finally {
@@ -144,6 +176,7 @@ function clientErrorHandler(req, res) {
 }
 
 module.exports = {
+  configure,
   report,
   reportException,
   expressErrorReporter,
