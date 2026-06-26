@@ -710,6 +710,27 @@
       <div class="automation-status" id="automationStatus">Loading automation settings...</div>
     </section>
 
+    <section class="automation-panel">
+      <h3 class="automation-title">🐛 Bug Reporting (JCubHub CM)</h3>
+      <div class="automation-row">
+        <div class="automation-copy">
+          <strong>Forward errors to Central Management</strong>
+          <span>Send crashes/errors to CM for AI triage. Configured here — no env vars.</span>
+        </div>
+        <input type="checkbox" id="bugReportEnabledToggle" class="automation-toggle" aria-label="Toggle bug reporting">
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;margin-top:10px">
+        <input type="url" id="bugReportUrl" placeholder="https://mgmt.jcubhub.com/api/reports"
+               style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid #334;background:#0b0b12;color:#eee" />
+        <input type="text" id="bugAppId" placeholder="books (app id)"
+               style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid #334;background:#0b0b12;color:#eee" />
+        <input type="password" id="bugReportSecret" autocomplete="new-password" placeholder="shared secret (leave blank to keep current)"
+               style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid #334;background:#0b0b12;color:#eee" />
+        <button id="saveBugReportingBtn" style="padding:9px 14px;border-radius:8px;border:0;background:#6366f1;color:#fff;cursor:pointer">Save</button>
+      </div>
+      <div class="automation-status" id="bugReportingStatus">Loading bug reporting settings...</div>
+    </section>
+
     <!-- Readarr Queue Panel -->
     <section class="requests-section" id="readarrPanel" style="margin-bottom: 20px; display: none;">
       <div class="section-header">
@@ -981,6 +1002,7 @@ request:BR-1234567890-abc123 | epub" style="width: 100%; min-height: 120px; resi
       document.getElementById('adminUsername').textContent = username;
       loadStats();
       loadRequests();
+      loadBugReporting();
     }
 
     function renderAutomationSettings(settings) {
@@ -1029,6 +1051,53 @@ request:BR-1234567890-abc123 | epub" style="width: 100%; min-height: 120px; resi
       } finally {
         if (autoApproveToggle) autoApproveToggle.disabled = false;
         if (autoAddReadarrToggle) autoAddReadarrToggle.disabled = false;
+      }
+    }
+
+    // Bug Reporting (JCubHub CM)
+    async function loadBugReporting() {
+      const status = document.getElementById('bugReportingStatus');
+      try {
+        const response = await apiCall('/api/admin/bug-reporting');
+        const cfg = await response.json();
+        const t = document.getElementById('bugReportEnabledToggle');
+        if (t) t.checked = cfg.enabled === true;
+        const url = document.getElementById('bugReportUrl');
+        if (url) url.value = cfg.url || '';
+        const appId = document.getElementById('bugAppId');
+        if (appId) appId.value = cfg.appId || 'books';
+        const secret = document.getElementById('bugReportSecret');
+        if (secret) secret.placeholder = cfg.secretSet ? '•••••••• (set — leave blank to keep)' : 'shared secret';
+        if (status) status.textContent = `Reporting: ${cfg.enabled ? 'On' : 'Off'}${cfg.secretSet ? ' · secret set' : ''}`;
+      } catch (e) {
+        if (status) status.textContent = 'Could not load bug reporting settings';
+      }
+    }
+
+    async function saveBugReporting() {
+      const status = document.getElementById('bugReportingStatus');
+      const btn = document.getElementById('saveBugReportingBtn');
+      if (btn) btn.disabled = true;
+      if (status) status.textContent = 'Saving...';
+      try {
+        const payload = {
+          enabled: document.getElementById('bugReportEnabledToggle')?.checked === true,
+          url: document.getElementById('bugReportUrl')?.value || '',
+          appId: document.getElementById('bugAppId')?.value || 'books',
+          secret: document.getElementById('bugReportSecret')?.value || '',
+        };
+        const response = await apiCall('/api/admin/bug-reporting', { method: 'POST', body: JSON.stringify(payload) });
+        const result = await response.json();
+        if (!response.ok || !result.success) throw new Error(result.error || 'Save failed');
+        const secret = document.getElementById('bugReportSecret');
+        if (secret) secret.value = '';
+        showToast('Bug reporting settings saved', 'success');
+        loadBugReporting();
+      } catch (e) {
+        showToast(e.message || 'Failed to save bug reporting settings', 'error');
+        if (status) status.textContent = 'Save failed';
+      } finally {
+        if (btn) btn.disabled = false;
       }
     }
 
@@ -2428,6 +2497,7 @@ request:BR-1234567890-abc123 | epub" style="width: 100%; min-height: 120px; resi
     document.getElementById('autoAddReadarrToggle')?.addEventListener('change', (e) => {
       updateAutomationSettings({ autoAddToReadarr: e.target.checked });
     });
+    document.getElementById('saveBugReportingBtn')?.addEventListener('click', saveBugReporting);
     
     // Enter key in test modal
     document.getElementById('testIsbn')?.addEventListener('keypress', (e) => {

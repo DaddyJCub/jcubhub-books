@@ -165,6 +165,10 @@ function setAppSetting(key, value) {
   `).run(key, String(value), now);
 }
 
+// Bug reporter reads its config (url/secret/app_id/enabled) from app_settings,
+// managed in the admin UI — no env vars / redeploy required.
+bugReporter.configure(getAppSetting);
+
 function loadAutomationSettingsFromDb() {
   const storedAutoApprove = getAppSetting('automation.autoApprove');
   const storedAutoAddToReadarr = getAppSetting('automation.autoAddToReadarr');
@@ -4000,6 +4004,33 @@ app.patch('/api/admin/automation',
     res.json({ success: true, automation: updated });
   }
 );
+
+// Bug Reporting config (JCubHub CM) — managed in the admin UI, no env vars.
+app.get('/api/admin/bug-reporting', authenticateToken, (req, res) => {
+  res.json({
+    enabled: ['1', 'true', 'on', 'yes'].includes(String(getAppSetting('bug_report_enabled') || '').toLowerCase()),
+    url: getAppSetting('bug_report_url') || '',
+    appId: getAppSetting('bug_app_id') || 'books',
+    secretSet: Boolean((getAppSetting('bug_report_secret') || '').trim()),
+  });
+});
+
+app.post('/api/admin/bug-reporting', authenticateToken, (req, res) => {
+  try {
+    const { enabled, url, appId, secret } = req.body || {};
+    setAppSetting('bug_report_enabled', enabled ? '1' : '0');
+    setAppSetting('bug_report_url', String(url || '').trim());
+    setAppSetting('bug_app_id', String(appId || 'books').trim() || 'books');
+    // Write-only: only overwrite the secret when a new value is supplied.
+    if (typeof secret === 'string' && secret.trim()) {
+      setAppSetting('bug_report_secret', secret.trim());
+    }
+    logger.info('Admin updated bug reporting settings', { admin: req.user?.username });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to save bug reporting settings' });
+  }
+});
 
 // ============================================
 // Batch Operations
